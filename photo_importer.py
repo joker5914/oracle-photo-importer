@@ -49,7 +49,20 @@ except ImportError:
     )
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+def _get_script_dir() -> Path:
+    """Return the directory where settings and logs should live.
+
+    When packaged with PyInstaller's --onefile, ``__file__`` points to a
+    temporary extraction directory that disappears at exit, so settings
+    would not persist. ``sys.executable`` points to the .exe itself, which
+    is where we want settings.json and photo_importer.log to live.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+SCRIPT_DIR = _get_script_dir()
 SETTINGS_FILE = SCRIPT_DIR / "settings.json"
 LOG_FILE = SCRIPT_DIR / "photo_importer.log"
 LOG = logging.getLogger("photo_importer")

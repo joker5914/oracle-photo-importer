@@ -18,23 +18,24 @@ if "%PYCMD%"=="" (
     echo                  Customer Photo Importer
     echo  ============================================================
     echo.
-    echo   This tool needs a program called Python to run, and Python
-    echo   isn't installed on this computer yet. Don't worry - it's
-    echo   free and only takes a minute to set up.
+    echo   This computer doesn't have Python installed, which is
+    echo   needed to run the tool from source.
     echo.
-    echo   HOW TO INSTALL PYTHON:
+    echo   THE EASY WAY  -  use the ready-made version:
+    echo   ============================================
+    echo   You don't need to install anything. Just download the
+    echo   prebuilt file and double-click it.
     echo.
-    echo     1. Open a web browser.
-    echo     2. Go to:  https://www.python.org/downloads/
-    echo     3. Click the big yellow "Download Python" button.
-    echo     4. Open the file that downloads to your computer.
-    echo     5. IMPORTANT:  On the FIRST screen of the installer,
-    echo                    check the box that says
-    echo                    "Add Python to PATH".
-    echo     6. Click "Install Now" and wait for it to finish.
-    echo     7. Come back here and double-click
-    echo        "Start Photo Importer" again.
+    echo     1. Go to:
+    echo        https://github.com/joker5914/oracle-photo-importer/releases/latest
+    echo     2. Click  "Customer Photo Importer.exe"  to download it.
+    echo     3. Double-click the downloaded file.
     echo.
+    echo   ------------------------------------------------------------
+    echo   The harder way is to install Python from
+    echo   https://www.python.org/downloads/  (make sure to check the
+    echo   "Add Python to PATH" box during install), then run
+    echo   "Start Photo Importer" again.
     echo  ============================================================
     echo.
     pause
@@ -85,7 +86,9 @@ echo     1. Make sure your computer has internet access.
 echo     2. Close this window.
 echo     3. Double-click "Start Photo Importer" again.
 echo.
-echo   If it still doesn't work, contact your IT support.
+echo   If it still doesn't work, contact your IT support, or use
+echo   the prebuilt .exe instead:
+echo   https://github.com/joker5914/oracle-photo-importer/releases/latest
 echo  ============================================================
 echo.
 pause

@@ -1,6 +1,7 @@
 @echo off
 REM Build a single-file Windows .exe of photo_importer using PyInstaller.
-REM Mainly for IT staff who want to distribute a standalone executable.
+REM This uses the same flags as the GitHub Actions workflow, so a locally
+REM built .exe is identical to the one published in the Releases page.
 setlocal
 cd /d "%~dp0"
 
@@ -16,7 +17,7 @@ if not exist ".venv\Scripts\activate.bat" (
 
 call ".venv\Scripts\activate.bat"
 python -m pip install pyinstaller
-pyinstaller --onefile --name photo_importer photo_importer.py
+pyinstaller --onefile --name "Customer Photo Importer" --collect-all oracledb photo_importer.py
 if errorlevel 1 (
     echo.
     echo  PyInstaller build failed.
@@ -24,7 +25,7 @@ if errorlevel 1 (
     exit /b 1
 )
 echo.
-echo  Built: dist\photo_importer.exe
+echo  Built: dist\Customer Photo Importer.exe
 echo.
 pause
 endlocal
