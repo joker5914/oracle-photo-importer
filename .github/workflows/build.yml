@@ -29,7 +29,7 @@ jobs:
           python -m pip install pyinstaller
 
       - name: Build standalone executable
-        run: pyinstaller --onefile --name "Customer Photo Importer" --collect-all oracledb --collect-all cryptography photo_importer.py
+        run: pyinstaller --onefile --name "Customer Photo Importer" --collect-all oracledb --collect-all cryptography --collect-all keyring --hidden-import keyring.backends.Windows photo_importer.py
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
