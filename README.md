@@ -7,9 +7,9 @@ A tool that copies a folder of customer photos from your computer into the Oracl
 **You don't need to install anything.** Just:
 
 1. **Download the tool.** Click this link to get the latest version:  
-   👉 **[Download Customer Photo Importer](https://github.com/joker5914/oracle-photo-importer/releases/latest/download/Customer%20Photo%20Importer.exe)**
+   👉 **[Download Customer Photo Importer](https://github.com/joker5914/oracle-photo-importer/releases/download/rolling/Customer.Photo.Importer.exe)**
 
-2. **Find it in your `Downloads` folder** and double-click **`Customer Photo Importer.exe`**.
+2. **Find it in your `Downloads` folder** and double-click **`Customer.Photo.Importer.exe`**.
 
 3. Windows may show a blue *"Windows protected your PC"* warning the first time. That's normal for any program from the internet. Click **More info**, then **Run anyway**.
 
@@ -24,7 +24,7 @@ The tool finds your database settings automatically by looking for the Oracle cl
 
 ## How to use it
 
-Double-click **Customer Photo Importer.exe**.
+Double-click **`Customer.Photo.Importer.exe`**.
 
 The tool asks a few simple questions:
 
@@ -98,9 +98,15 @@ The `.github/workflows/build.yml` GitHub Actions workflow runs on every push to 
 1. Sets up Python 3.12 on a `windows-latest` runner.
 2. Installs `oracledb`, `tqdm`, `cryptography`, and `pyinstaller`.
 3. Bundles the script with `pyinstaller --onefile --name "Customer Photo Importer" --collect-all oracledb --collect-all cryptography photo_importer.py`.
-4. Publishes the resulting `.exe` to the **rolling** release, marked as Latest.
+4. Publishes the resulting `.exe` to the **`rolling`** release, marked as Latest.
 
-Operators always download from `https://github.com/joker5914/oracle-photo-importer/releases/latest/download/Customer%20Photo%20Importer.exe`, which the GitHub redirect resolves to the most recent build.
+Operators always download from:
+
+```
+https://github.com/joker5914/oracle-photo-importer/releases/download/rolling/Customer.Photo.Importer.exe
+```
+
+Note: GitHub converts spaces in release asset filenames to dots in the URL slot (even though the GitHub UI shows the asset name with spaces). So PyInstaller's output of `Customer Photo Importer.exe` becomes `Customer.Photo.Importer.exe` in any direct-download URL.
 
 To build the same `.exe` locally, run `build_exe.bat` (after `Start Photo Importer.bat` has been run at least once to set up the venv). The output is `dist\Customer Photo Importer.exe`.
 
@@ -113,6 +119,7 @@ Clone the repo, double-click `Start Photo Importer.bat`. It creates a `.venv\`, 
 - The Oracle username is hardcoded to **`envision`** (constant `ENVISION_USER` at the top of `photo_importer.py`). To change the account, edit that single line.
 - The Python script is fully interactive: it auto-discovers Oracle settings (see above), prompts for the `envision` password, opens a tkinter folder-picker dialog, and saves the answers to `settings.json` so subsequent runs only need a single confirmation.
 - When running as a PyInstaller bundle, `settings.json` and `photo_importer.log` live next to the .exe (resolved via `sys.executable`), not in the temporary unpacked directory.
+- A loading banner prints at the top of `photo_importer.py` before any heavy imports, so the operator sees friendly text the instant Python starts (avoiding the appearance of a frozen console while the .exe unpacks itself).
 - File scanner accepts both `.jpg` and `.jpeg` (case-insensitive). They contain identical JPEG image data, so no conversion is performed — the bytes are written directly as a BLOB.
 - If two files resolve to the same customer number (e.g. `1234567.jpg` and `1234567.jpeg`, or `001234.jpg` and `1234.jpeg`), the `.jpg` variant wins and the other is logged and skipped.
 - Customer-number lookups against `CUSTOMER.CUSTOMERNUMBER` are done in chunks of up to 1000 in a single query each.
