@@ -73,6 +73,72 @@ After your first run, the tool remembers your database settings (including the E
 
 It's safe to run the tool again on the same folder. If a customer already has a photo, the tool just updates it with the newer one — it doesn't create duplicates. So if you're not sure whether something imported, just run it again.
 
+## Running automatically (Windows Task Scheduler)
+
+You can have Windows Task Scheduler run the importer for you on a schedule — say, every morning at 2am, or every hour. Here's how to set it up.
+
+### Step 1: Run the tool interactively at least once
+
+Run **`Customer.Photo.Importer.exe`** normally and let it import a folder of photos successfully. This saves your database settings (server, port, service name, Envision password) and the folder you picked. The scheduled task will reuse all of that.
+
+### Step 2: Put the .exe somewhere permanent
+
+Move `Customer.Photo.Importer.exe` to a folder you won't accidentally clean up later — something like `C:\Tools\PhotoImporter\`. Make sure `settings.json` (created in step 1) lives in the same folder.
+
+### Step 3: Create the scheduled task
+
+1. Open **Task Scheduler** (search for "Task Scheduler" in the Start menu).
+2. In the right-hand panel, click **Create Basic Task...**
+3. **Name:** *"Customer Photo Import"* (or whatever you like). Click **Next**.
+4. **Trigger:** Pick how often you want it to run (daily, weekly, on log-on, etc.). Click **Next**, set the time, and click **Next** again.
+5. **Action:** *"Start a program"*. Click **Next**.
+6. **Program/script:** the full path to the .exe, for example:
+   ```
+   C:\Tools\PhotoImporter\Customer.Photo.Importer.exe
+   ```
+7. **Add arguments (optional):** to make it run without any prompts, type:
+   ```
+   --unattended --folder "C:\incoming\photos"
+   ```
+   The `--unattended` flag tells the tool to skip all the prompts and use your saved settings. The `--folder` part is optional — if you leave it off, the tool will import from whatever folder you imported last time.
+8. Click **Next**, review the summary, then click **Finish**.
+
+That's it. The task will run on its schedule using the database settings you saved in step 1.
+
+### Where to see what happened
+
+After each scheduled run, the tool writes to **`photo_importer.log`** in the same folder as the .exe. Open that file to see how many photos were imported, how long it took, and whether anything failed.
+
+For extra confidence, right-click the task in Task Scheduler and choose **Run** to trigger it on demand. Then check the log.
+
+### Command-line reference
+
+```
+Customer.Photo.Importer.exe [--unattended] [--folder PATH]
+
+Options:
+  --unattended, --auto, -y    Run with no prompts. Requires saved settings
+                              from a previous interactive run.
+  --folder PATH, -f PATH      Override the photo folder. Optional - if not
+                              provided, the tool uses the last folder it
+                              imported from.
+```
+
+Run `Customer.Photo.Importer.exe --help` for a full list of options.
+
+### Exit codes
+
+Useful if you want Task Scheduler to react differently to success vs failure (for example, send an email only on failure):
+
+| Code | Meaning                                              |
+|------|------------------------------------------------------|
+| 0    | Success (including "folder was empty, nothing to do") |
+| 1    | Unexpected error — check `photo_importer.log`        |
+| 2    | Missing settings, or `--folder` path doesn't exist   |
+| 3    | Could not connect to the database, or login failed  |
+| 4    | Import ran, but some individual photos failed       |
+| 130  | Cancelled by user (Ctrl+C)                          |
+
 ---
 
 ## For IT / technical staff
@@ -90,6 +156,19 @@ On first run, the tool resolves the database connection details automatically us
 For each `tnsnames.ora` found, a tolerant parser extracts `HOST`, `PORT`, and `SERVICE_NAME` (or `SID`) from every connect descriptor it can parse. Multi-alias entries (`A, B = (...)`) are expanded, and connections that resolve to the same `host:port/service` are collapsed. If there's exactly one connection, it's used silently; if multiple, the operator picks from a numbered list. If none, the tool falls back to a manual setup wizard.
 
 Resolved settings are saved to `settings.json` (next to the .exe), so subsequent runs skip discovery entirely.
+
+### Unattended mode
+
+When `--unattended` (or `--auto`, or `-y`) is on the command line:
+
+- **Argv is pre-scanned at module load** before the loading banner prints, so unattended runs don't pollute Task Scheduler logs with interactive UI noise.
+- **All interactive prompts are skipped.** The tool reads the connection settings out of `settings.json`; if any of `server`, `port`, `service`, or `password` are missing it exits with code 2 and a clear log message instead of prompting.
+- **No folder picker.** The folder comes from `--folder` if provided, otherwise from `settings.last_folder`. If neither exists, exit 2.
+- **No "ready to import?" confirmation.** The tool proceeds as soon as it has a folder.
+- **The `tqdm` progress bar is disabled** (`disable=True`), since Task Scheduler may run without an attached console.
+- **No final "Press Enter to close" pause.** The process exits cleanly so Task Scheduler can record the exit code.
+
+An empty folder is treated as success (exit 0), since for a recurring task that's the normal "nothing new to import" case.
 
 ### Distribution
 
@@ -112,14 +191,18 @@ To build the same `.exe` locally, run `build_exe.bat` (after `Start Photo Import
 
 ### Running from source
 
-Clone the repo, double-click `Start Photo Importer.bat`. It creates a `.venv\`, installs dependencies, and launches `photo_importer.py`. Requires Python 3.8+ on the operator's `PATH`.
+Clone the repo, double-click `Start Photo Importer.bat`. It creates a `.venv\`, installs dependencies, and launches `photo_importer.py`. Requires Python 3.8+ on the operator's `PATH`. CLI flags work identically when running from source:
+
+```
+python photo_importer.py --unattended --folder "C:\incoming\photos"
+```
 
 ### How it works
 
 - The Oracle username is hardcoded to **`envision`** (constant `ENVISION_USER` at the top of `photo_importer.py`). To change the account, edit that single line.
-- The Python script is fully interactive: it auto-discovers Oracle settings (see above), prompts for the `envision` password, opens a tkinter folder-picker dialog, and saves the answers to `settings.json` so subsequent runs only need a single confirmation.
+- The Python script is fully interactive by default: it auto-discovers Oracle settings (see above), prompts for the `envision` password, opens a tkinter folder-picker dialog, and saves the answers to `settings.json` so subsequent runs only need a single confirmation. With `--unattended`, every prompt is skipped and the tool fails fast on missing settings.
 - When running as a PyInstaller bundle, `settings.json` and `photo_importer.log` live next to the .exe (resolved via `sys.executable`), not in the temporary unpacked directory.
-- A loading banner prints at the top of `photo_importer.py` before any heavy imports, so the operator sees friendly text the instant Python starts (avoiding the appearance of a frozen console while the .exe unpacks itself).
+- A loading banner prints at the top of `photo_importer.py` before any heavy imports, so the operator sees friendly text the instant Python starts (avoiding the appearance of a frozen console while the .exe unpacks itself). The banner is suppressed in unattended mode.
 - File scanner accepts both `.jpg` and `.jpeg` (case-insensitive). They contain identical JPEG image data, so no conversion is performed — the bytes are written directly as a BLOB.
 - If two files resolve to the same customer number (e.g. `1234567.jpg` and `1234567.jpeg`, or `001234.jpg` and `1234.jpeg`), the `.jpg` variant wins and the other is logged and skipped.
 - Customer-number lookups against `CUSTOMER.CUSTOMERNUMBER` are done in chunks of up to 1000 in a single query each.

@@ -3,7 +3,11 @@
 
 A simple, interactive tool that imports customer photos into an Oracle 19c
 database. Walks the operator through every step in plain language; no
-command-line flags or config-file editing required.
+command-line flags or config-file editing required for interactive use.
+
+Also supports an --unattended mode for automated runs from Windows Task
+Scheduler or any other scheduler. See parse_args() and the README for
+details.
 
 The Oracle username is fixed (the shared 'envision' account); operators
 only need to know its password. The database server, port, and service
@@ -12,33 +16,36 @@ machine.
 """
 from __future__ import annotations
 
-# ============================================================================
-# Loading message - shown as early as possible.
-#
-# When the operator double-clicks the bundled .exe, Windows takes a few
-# seconds to unpack the PyInstaller bundle and start Python. During that
-# time the console window is blank, which makes the tool look frozen.
-# Printing this message as the first thing Python does means the operator
-# sees friendly text the instant the interpreter wakes up - before the
-# heavy oracledb + cryptography + tqdm imports below, which add another
-# second or two of load time on top of the unpack.
-# ============================================================================
 import sys
 
-print()
-print("  ============================================================")
-print("                  Customer Photo Importer")
-print("  ============================================================")
-print()
-print("  Starting up, please wait a moment...")
-print()
-print("  The first launch can take a few seconds while the program")
-print("  unpacks itself. Please don't close this window - it isn't")
-print("  frozen, just loading.")
-print()
-sys.stdout.flush()
+# ============================================================================
+# Detect --unattended early (before heavy imports) so we can skip the
+# interactive loading banner when running from Task Scheduler. The full
+# argparse-based parse happens later via parse_args(); this is just a quick
+# check of argv so the banner decision can be made immediately.
+# ============================================================================
+_UNATTENDED_EARLY = (
+    "--unattended" in sys.argv
+    or "--auto" in sys.argv
+    or "-y" in sys.argv
+)
+
+if not _UNATTENDED_EARLY:
+    print()
+    print("  ============================================================")
+    print("                  Customer Photo Importer")
+    print("  ============================================================")
+    print()
+    print("  Starting up, please wait a moment...")
+    print()
+    print("  The first launch can take a few seconds while the program")
+    print("  unpacks itself. Please don't close this window - it isn't")
+    print("  frozen, just loading.")
+    print()
+    sys.stdout.flush()
 
 # Lightweight standard-library imports next.
+import argparse
 import getpass
 import json
 import logging
@@ -54,10 +61,11 @@ def _die_friendly(message: str) -> None:
     print()
     print(f"  {message}")
     print()
-    try:
-        input("  Press Enter to close this window...")
-    except (KeyboardInterrupt, EOFError):
-        pass
+    if not _UNATTENDED_EARLY:
+        try:
+            input("  Press Enter to close this window...")
+        except (KeyboardInterrupt, EOFError):
+            pass
     sys.exit(1)
 
 
@@ -99,6 +107,15 @@ LOG_FILE = SCRIPT_DIR / "photo_importer.log"
 LOG = logging.getLogger("photo_importer")
 BATCH_SIZE = 50
 
+# Exit codes used by the tool. Documented in the README so Task Scheduler
+# can branch on them.
+EXIT_OK = 0
+EXIT_GENERIC_ERROR = 1
+EXIT_BAD_CONFIG = 2       # missing settings / bad folder path
+EXIT_DB_ERROR = 3         # connect / auth failed
+EXIT_PARTIAL_IMPORT = 4   # ran, but some photos failed
+EXIT_INTERRUPTED = 130    # Ctrl+C / cancel
+
 # The Oracle account this tool always logs in as. Everyone who uses the
 # tool knows the shared password for this account, so only the password
 # needs to be asked for at runtime.
@@ -119,6 +136,65 @@ WHEN NOT MATCHED THEN
   INSERT (CUST_ID, PHOTO, PHOTOMODIFIEDDATE)
   VALUES (:cust_id, :photo, SYSTIMESTAMP)
 """
+
+
+# ============================================================================
+# Argument parsing
+# ============================================================================
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments.
+
+    Interactive use needs no arguments at all. Automation (Task Scheduler,
+    cron-style runners, CI jobs) should pass --unattended so the tool runs
+    end-to-end with no prompts and a non-zero exit code on any failure.
+    """
+    parser = argparse.ArgumentParser(
+        prog="Customer.Photo.Importer",
+        description=(
+            "Imports customer photos into the Oracle database. Runs "
+            "interactively by default; pass --unattended to run from "
+            "Windows Task Scheduler or any other automation."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  Customer.Photo.Importer.exe\n"
+            "      Interactive mode. Walks you through each step.\n\n"
+            "  Customer.Photo.Importer.exe --unattended\n"
+            "      No prompts. Uses the database settings and folder saved\n"
+            "      from a previous interactive run.\n\n"
+            "  Customer.Photo.Importer.exe --unattended --folder \"C:\\photos\\inbox\"\n"
+            "      No prompts. Imports from a specific folder.\n\n"
+            "exit codes:\n"
+            "  0   Success\n"
+            "  1   Unexpected error (see photo_importer.log)\n"
+            "  2   Missing settings or invalid --folder path\n"
+            "  3   Database connection or authentication failed\n"
+            "  4   Import completed but some photos failed\n"
+            "  130 Cancelled by user\n"
+        ),
+    )
+    parser.add_argument(
+        "--unattended", "--auto", "-y",
+        action="store_true",
+        dest="unattended",
+        help=(
+            "Run with no prompts. Requires saved settings (server, port, "
+            "service, password) from a previous interactive run. Fails fast "
+            "with a non-zero exit code on any error."
+        ),
+    )
+    parser.add_argument(
+        "--folder", "-f",
+        dest="folder",
+        metavar="PATH",
+        help=(
+            "Photo folder to import from. Defaults to the last folder used. "
+            "Required for unattended mode if no folder has ever been saved."
+        ),
+    )
+    return parser.parse_args()
 
 
 # ============================================================================
@@ -446,7 +522,7 @@ def discover_oracle_connections() -> List[Dict[str, str]]:
 
 
 # ============================================================================
-# Setup wizards
+# Setup wizards (interactive only)
 # ============================================================================
 
 def setup_wizard(saved: Dict[str, str]) -> Dict[str, str]:
@@ -533,7 +609,7 @@ def manual_setup_wizard(saved: Dict[str, str]) -> Dict[str, str]:
 
 
 # ============================================================================
-# Plain-English error explanations
+# Plain-English error explanations (interactive mode only)
 # ============================================================================
 
 def explain_db_error(exc: BaseException) -> None:
@@ -688,7 +764,9 @@ def flush_batch(cur: "oracledb.Cursor", batch: List[Dict[str, object]]) -> int:
 
 
 def import_photos(
-    conn: "oracledb.Connection", files: List[Path]
+    conn: "oracledb.Connection",
+    files: List[Path],
+    quiet: bool = False,
 ) -> Tuple[int, int, int]:
     customer_numbers = [f.stem for f in files]
     info("Looking up customer records in the database...")
@@ -715,6 +793,7 @@ def import_photos(
         dynamic_ncols=True,
         desc="  Importing",
         smoothing=0.1,
+        disable=quiet,  # No visual bar in unattended runs (no console).
     )
 
     try:
@@ -724,20 +803,23 @@ def import_photos(
             except ValueError:
                 LOG.warning("File name is not a number: %s", path.name)
                 missing += 1
-                progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
+                if not quiet:
+                    progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
                 continue
             cust_id = custid_map.get(normalized)
             if cust_id is None:
                 LOG.warning("No customer found for: %s", path.name)
                 missing += 1
-                progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
+                if not quiet:
+                    progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
                 continue
             try:
                 blob = path.read_bytes()
             except OSError as exc:
                 LOG.error("Could not read %s: %s", path, exc)
                 errors += 1
-                progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
+                if not quiet:
+                    progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
                 continue
             batch.append({"cust_id": cust_id, "photo": blob})
             if len(batch) >= BATCH_SIZE:
@@ -746,14 +828,16 @@ def import_photos(
                 errors += len(batch) - written
                 batch.clear()
                 conn.commit()
-                progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
+                if not quiet:
+                    progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
         if batch:
             written = flush_batch(cur, batch)
             ok_count += written
             errors += len(batch) - written
             batch.clear()
             conn.commit()
-            progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
+            if not quiet:
+                progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
     finally:
         progress.close()
         cur.close()
@@ -765,17 +849,31 @@ def import_photos(
 # Main flow
 # ============================================================================
 
-def _run_app() -> int:
-    info("Ready! Let's get started.")
-    info("")
-    info("This tool copies customer photos into the database.")
-    info("Just answer the questions and we'll do the rest.")
-    print()
+def _run_app(args: argparse.Namespace) -> int:
+    if not args.unattended:
+        info("Ready! Let's get started.")
+        info("")
+        info("This tool copies customer photos into the database.")
+        info("Just answer the questions and we'll do the rest.")
+        print()
 
     saved = load_settings()
 
     # ---- Step 1: connection settings ----
-    if saved.get("server") and saved.get("password"):
+    if args.unattended:
+        required = ("server", "port", "service", "password")
+        missing_settings = [k for k in required if not saved.get(k)]
+        if missing_settings:
+            fail(
+                "Unattended mode is missing required setting(s): "
+                + ", ".join(missing_settings)
+            )
+            info("Run the tool interactively once first to save them.")
+            LOG.error("Unattended run missing required settings: %s", missing_settings)
+            return EXIT_BAD_CONFIG
+        settings = dict(saved)
+        LOG.info("Unattended run using saved settings for server '%s'", settings["server"])
+    elif saved.get("server") and saved.get("password"):
         info(f"Last time you connected to '{saved['server']}'.")
         if ask_yes_no("Use the same database settings as last time?", default=True):
             settings = dict(saved)
@@ -787,7 +885,8 @@ def _run_app() -> int:
     dsn = f"{settings['server']}:{settings['port']}/{settings['service']}"
 
     # ---- Step 2: test the connection ----
-    section("Connecting to the database")
+    if not args.unattended:
+        section("Connecting to the database")
     info(f"Connecting to {settings['server']} as '{ENVISION_USER}' ...")
     try:
         conn = oracledb.connect(
@@ -800,43 +899,61 @@ def _run_app() -> int:
         print()
         fail("Could not connect to the database.")
         print()
-        explain_db_error(exc)
-        return 1
+        if not args.unattended:
+            explain_db_error(exc)
+        else:
+            info(f"  {exc}")
+        return EXIT_DB_ERROR
 
     ok("Connected!")
     save_settings(settings)  # only after a successful connect
 
     try:
         # ---- Step 3: pick the photo folder ----
-        section("Choose your photo folder")
-        info("A window will pop up so you can browse to your folder.")
-        info("(If the window doesn't appear, look behind this one.)")
-        folder = pick_folder_dialog(initial=saved.get("last_folder"))
-        if not folder:
-            print()
-            info("No folder was picked.")
-            folder = ask(
-                "Type the full path to your photo folder",
-                default=saved.get("last_folder"),
-            )
+        if args.unattended:
+            folder = args.folder or saved.get("last_folder")
+            if not folder:
+                fail("No folder to import from.")
+                info(
+                    "Use --folder PATH, or run the tool interactively once "
+                    "to save a default folder."
+                )
+                LOG.error("Unattended run missing folder")
+                return EXIT_BAD_CONFIG
+        else:
+            section("Choose your photo folder")
+            info("A window will pop up so you can browse to your folder.")
+            info("(If the window doesn't appear, look behind this one.)")
+            folder = pick_folder_dialog(initial=saved.get("last_folder"))
+            if not folder:
+                print()
+                info("No folder was picked.")
+                folder = ask(
+                    "Type the full path to your photo folder",
+                    default=saved.get("last_folder"),
+                )
         folder_path = Path(folder).expanduser().resolve()
         if not folder_path.is_dir():
             print()
             fail(f"That folder doesn't exist: {folder_path}")
-            info("Double-check the path and try again.")
-            return 1
+            if not args.unattended:
+                info("Double-check the path and try again.")
+            LOG.error("Folder does not exist: %s", folder_path)
+            return EXIT_BAD_CONFIG
         settings["last_folder"] = str(folder_path)
         save_settings(settings)
+        LOG.info("Importing from folder: %s", folder_path)
 
         # ---- Step 4: scan ----
         files, duplicates = scan_photo_folder(folder_path)
         if not files:
             print()
-            fail(f"No .jpg or .jpeg photos were found in {folder_path}")
-            info("Make sure the folder contains photos ending in .jpg or .jpeg")
-            return 1
+            info(f"No .jpg or .jpeg photos were found in {folder_path}")
+            if not args.unattended:
+                info("Make sure the folder contains photos ending in .jpg or .jpeg")
+            LOG.info("No photos found in %s - nothing to do", folder_path)
+            return EXIT_OK  # not an error; just nothing to import
 
-        print()
         info(f"Found {len(files)} photo(s) in:")
         info(f"  {folder_path}")
         if duplicates:
@@ -844,16 +961,20 @@ def _run_app() -> int:
                 f"({duplicates} extra file(s) shared a customer number with another "
                 "and will be skipped.)"
             )
-        print()
-        if not ask_yes_no(f"Ready to import these {len(files)} photo(s)?", default=True):
+        if not args.unattended:
             print()
-            info("OK, cancelled. No changes were made.")
-            return 0
+            if not ask_yes_no(f"Ready to import these {len(files)} photo(s)?", default=True):
+                print()
+                info("OK, cancelled. No changes were made.")
+                return EXIT_OK
 
         # ---- Step 5: import ----
-        section("Importing photos")
+        if not args.unattended:
+            section("Importing photos")
+        else:
+            print()
         t0 = time.perf_counter()
-        ok_count, missing, errors = import_photos(conn, files)
+        ok_count, missing, errors = import_photos(conn, files, quiet=args.unattended)
         elapsed = time.perf_counter() - t0
 
         # ---- Step 6: summary ----
@@ -874,7 +995,12 @@ def _run_app() -> int:
             info(f"  {LOG_FILE.name}")
             print()
 
-        return 0 if errors == 0 else 4
+        LOG.info(
+            "Run completed: imported=%d missing=%d errors=%d duplicates=%d elapsed=%.1fs",
+            ok_count, missing, errors, duplicates, elapsed,
+        )
+
+        return EXIT_OK if errors == 0 else EXIT_PARTIAL_IMPORT
     finally:
         try:
             conn.close()
@@ -883,30 +1009,38 @@ def _run_app() -> int:
 
 
 def main() -> int:
+    args = parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[logging.FileHandler(str(LOG_FILE), encoding="utf-8")],
         force=True,
     )
+
+    if args.unattended:
+        LOG.info("Starting unattended run (argv=%s)", sys.argv)
+
     try:
-        return _run_app()
+        return _run_app(args)
     except KeyboardInterrupt:
         print()
         info("Cancelled. No more changes will be made.")
-        return 130
+        LOG.warning("Cancelled by user")
+        return EXIT_INTERRUPTED
     except Exception as exc:  # noqa: BLE001
         LOG.exception("Unexpected error")
         print()
         fail(f"Something went wrong: {exc}")
         info(f"Details have been saved to: {LOG_FILE.name}")
-        return 1
+        return EXIT_GENERIC_ERROR
     finally:
-        try:
-            print()
-            input("  Press Enter to close this window...")
-        except (KeyboardInterrupt, EOFError):
-            pass
+        if not args.unattended:
+            try:
+                print()
+                input("  Press Enter to close this window...")
+            except (KeyboardInterrupt, EOFError):
+                pass
 
 
 if __name__ == "__main__":
