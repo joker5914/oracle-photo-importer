@@ -1,0 +1,57 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build .exe and publish latest release
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build standalone executable
+        run: pyinstaller --onefile --name "Customer Photo Importer" --collect-all oracledb photo_importer.py
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: customer-photo-importer-exe
+          path: "dist/Customer Photo Importer.exe"
+          if-no-files-found: error
+
+      - name: Publish to 'latest' release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          body: |
+            ## Customer Photo Importer — latest build
+
+            **For operators:** Download `Customer Photo Importer.exe` below and double-click it. Nothing else needs to be installed.
+
+            The first time you run it, Windows may show a blue "Windows protected your PC" warning. That's normal for any program downloaded from the internet. Click **More info**, then **Run anyway**.
+
+            ---
+            Built automatically from commit `${{ github.sha }}`.
+          files: "dist/Customer Photo Importer.exe"
+          make_latest: "true"
+          prerelease: false
