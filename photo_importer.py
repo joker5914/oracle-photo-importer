@@ -52,6 +52,10 @@ LOG_FILE = SCRIPT_DIR / "photo_importer.log"
 LOG = logging.getLogger("photo_importer")
 BATCH_SIZE = 50
 
+# Accepted photo file extensions. .jpg and .jpeg hold the exact same JPEG
+# image data, so the tool treats them identically. Case is ignored.
+ALLOWED_EXTS = {".jpg", ".jpeg"}
+
 MERGE_SQL = """
 MERGE INTO CUSTOMER_PHOTO tgt
 USING (SELECT :cust_id AS CUST_ID FROM dual) src
@@ -243,6 +247,66 @@ def explain_db_error(exc: BaseException) -> None:
         info(f"  {text}")
         info("")
         info("Try starting the tool again, or contact your IT support.")
+
+
+# ============================================================================
+# File scanning
+# ============================================================================
+
+def _stem_key(path: Path) -> str:
+    """Normalize a filename stem for matching/dedup.
+
+    Returns the numeric stem as a canonical string ("001234" -> "1234")
+    when possible; otherwise the lowercased raw stem.
+    """
+    try:
+        return str(int(path.stem))
+    except ValueError:
+        return path.stem.lower()
+
+
+def scan_photo_folder(
+    folder_path: Path,
+) -> Tuple[List[Path], int]:
+    """Find photos in the folder and de-duplicate by customer number.
+
+    Accepts both .jpg and .jpeg (case-insensitive). If two files share the
+    same customer number (e.g. ``123.jpg`` and ``123.jpeg``, or ``0123.jpg``
+    and ``123.jpeg``), the .jpg variant is preferred and the other is
+    skipped with a warning written to the log file.
+
+    Returns ``(files_to_import, duplicates_skipped_count)``.
+    """
+    raw = [
+        p for p in folder_path.iterdir()
+        if p.is_file() and p.suffix.lower() in ALLOWED_EXTS
+    ]
+
+    # Sort so that, for any given customer number, .jpg is encountered
+    # before .jpeg. Then within an extension, sort by name for stable order.
+    def sort_key(p: Path):
+        ext_priority = 0 if p.suffix.lower() == ".jpg" else 1
+        return (_stem_key(p), ext_priority, p.name.lower())
+
+    raw.sort(key=sort_key)
+
+    seen: Dict[str, Path] = {}
+    deduped: List[Path] = []
+    duplicates = 0
+    for p in raw:
+        key = _stem_key(p)
+        if key in seen:
+            LOG.warning(
+                "Multiple files for the same customer number: "
+                "keeping '%s', skipping '%s'",
+                seen[key].name, p.name,
+            )
+            duplicates += 1
+            continue
+        seen[key] = p
+        deduped.append(p)
+
+    return deduped, duplicates
 
 
 # ============================================================================
@@ -443,19 +507,21 @@ def _run_app() -> int:
         save_settings(settings)
 
         # ---- Step 4: scan ----
-        files = sorted(
-            p for p in folder_path.iterdir()
-            if p.is_file() and p.suffix.lower() == ".jpg"
-        )
+        files, duplicates = scan_photo_folder(folder_path)
         if not files:
             print()
-            fail(f"No .jpg photos were found in {folder_path}")
-            info("Make sure the folder contains photos with names ending in .jpg")
+            fail(f"No .jpg or .jpeg photos were found in {folder_path}")
+            info("Make sure the folder contains photos ending in .jpg or .jpeg")
             return 1
 
         print()
         info(f"Found {len(files)} photo(s) in:")
         info(f"  {folder_path}")
+        if duplicates:
+            info(
+                f"({duplicates} extra file(s) shared a customer number with another "
+                "and will be skipped.)"
+            )
         print()
         if not ask_yes_no(f"Ready to import these {len(files)} photo(s)?", default=True):
             print()
@@ -477,9 +543,11 @@ def _run_app() -> int:
         print(f"     Imported successfully:        {ok_count}")
         print(f"     No matching customer:         {missing}")
         print(f"     Could not read file:          {errors}")
+        if duplicates:
+            print(f"     Duplicate files skipped:      {duplicates}")
         print(f"     Time taken:                   {elapsed:.1f} seconds")
         print()
-        if missing or errors:
+        if missing or errors or duplicates:
             info("Some photos were skipped. Details are in:")
             info(f"  {LOG_FILE.name}")
             print()

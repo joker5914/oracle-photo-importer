@@ -7,7 +7,7 @@ A tool that copies a folder of customer photos from your computer into the Oracl
 1. **A Windows computer** (Mac and Linux work too, but this guide is written for Windows).
 2. **Python** installed on the computer. If it isn't, the tool tells you exactly how to get it (it's free and takes about 2 minutes).
 3. **Your database login** — the server address, your username, and your password. Your database administrator can give you these if you don't know them.
-4. **A folder full of photos.** Each photo file has to be named with the customer's number plus `.jpg`. For example, customer number `1234567` should be saved as `1234567.jpg`.
+4. **A folder full of photos.** Each photo file has to be named with the customer's number plus `.jpg` or `.jpeg`. For example, customer number `1234567` would be saved as `1234567.jpg` (or `1234567.jpeg` — both work).
 
 ## How to install (just once)
 
@@ -46,15 +46,18 @@ If something else goes wrong, the tool writes the technical details to a file ca
 
 ## Naming your photos
 
-The tool finds each customer by looking at the photo's file name. The file name has to be the customer's `customernumber` value, followed by `.jpg`.
+The tool finds each customer by looking at the photo's file name. The file name has to be the customer's `customernumber` value, followed by `.jpg` or `.jpeg`. Capitalization doesn't matter — `.JPG` and `.JPEG` work too.
 
-| File name           | Works?       | Why                                     |
-|---------------------|--------------|-----------------------------------------|
-| `1234567.jpg`       | Yes          | Just the customer number plus `.jpg`    |
-| `9876543.jpg`       | Yes          | Just the customer number plus `.jpg`    |
-| `John_Smith.jpg`    | No           | The name isn't a number                 |
-| `cust_1234567.jpg`  | No           | Has extra text in front                 |
-| `1234567.jpeg`      | No           | The file must end in `.jpg`, not `.jpeg`|
+| File name           | Works?       | Why                                                            |
+|---------------------|--------------|----------------------------------------------------------------|
+| `1234567.jpg`       | Yes          | Just the customer number plus `.jpg`                           |
+| `1234567.jpeg`      | Yes          | `.jpeg` works exactly the same as `.jpg`                       |
+| `9876543.JPG`       | Yes          | Capitalization doesn't matter                                  |
+| `John_Smith.jpg`    | No           | The name isn't a number                                        |
+| `cust_1234567.jpg`  | No           | Has extra text in front of the number                          |
+| `1234567.png`       | No           | Must end in `.jpg` or `.jpeg`                                  |
+
+If you happen to have two files for the same customer (like `1234567.jpg` **and** `1234567.jpeg`), the tool keeps one and skips the other so you don't accidentally upload the same person's photo twice. It tells you in the summary if this happened.
 
 ## Where your settings are saved
 
@@ -76,6 +79,8 @@ This tool is built in Python 3 using [`oracledb`](https://python-oracledb.readth
 
 - `Start Photo Importer.bat` finds Python (or walks the user through installing it), creates a `.venv\`, installs `oracledb` and `tqdm`, then launches `photo_importer.py`.
 - The Python script is fully interactive: it prompts for credentials, opens a tkinter folder-picker dialog, and saves answers (yes, including the password) to `settings.json` so subsequent runs only need a single confirmation.
+- File scanner accepts both `.jpg` and `.jpeg` (case-insensitive). They contain identical JPEG image data, so no conversion is performed — the bytes are written directly as a BLOB.
+- If two files resolve to the same customer number (e.g. `1234567.jpg` and `1234567.jpeg`, or `001234.jpg` and `1234.jpeg`), the `.jpg` variant wins and the other is logged and skipped.
 - Customer-number lookups against `CUSTOMER.CUSTOMERNUMBER` are done in chunks of up to 1000 in a single query each.
 - Photos are written into `CUSTOMER_PHOTO` via a `MERGE` statement so re-runs update existing rows instead of failing on the primary key.
 - `PHOTO` is bound as `DB_TYPE_BLOB`. Writes happen via `executemany` in batches of 50, with a per-row fallback if a batch fails so a single bad file can't poison the whole batch. `conn.commit()` runs after every batch so progress survives an interruption.
