@@ -12,12 +12,38 @@ machine.
 """
 from __future__ import annotations
 
+# ============================================================================
+# Loading message - shown as early as possible.
+#
+# When the operator double-clicks the bundled .exe, Windows takes a few
+# seconds to unpack the PyInstaller bundle and start Python. During that
+# time the console window is blank, which makes the tool look frozen.
+# Printing this message as the first thing Python does means the operator
+# sees friendly text the instant the interpreter wakes up - before the
+# heavy oracledb + cryptography + tqdm imports below, which add another
+# second or two of load time on top of the unpack.
+# ============================================================================
+import sys
+
+print()
+print("  ============================================================")
+print("                  Customer Photo Importer")
+print("  ============================================================")
+print()
+print("  Starting up, please wait a moment...")
+print()
+print("  The first launch can take a few seconds while the program")
+print("  unpacks itself. Please don't close this window - it isn't")
+print("  frozen, just loading.")
+print()
+sys.stdout.flush()
+
+# Lightweight standard-library imports next.
 import getpass
 import json
 import logging
 import os
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -35,6 +61,8 @@ def _die_friendly(message: str) -> None:
     sys.exit(1)
 
 
+# Heavy third-party imports last - these take a noticeable moment to load
+# in a packaged .exe, so the message above is already on screen by now.
 try:
     import oracledb
 except ImportError:
@@ -96,14 +124,6 @@ WHEN NOT MATCHED THEN
 # ============================================================================
 # UI helpers
 # ============================================================================
-
-def banner() -> None:
-    print()
-    print("  " + "=" * 60)
-    print("                  Customer Photo Importer")
-    print("  " + "=" * 60)
-    print()
-
 
 def section(title: str) -> None:
     print()
@@ -746,8 +766,9 @@ def import_photos(
 # ============================================================================
 
 def _run_app() -> int:
-    banner()
-    info("Welcome! This tool copies customer photos into the database.")
+    info("Ready! Let's get started.")
+    info("")
+    info("This tool copies customer photos into the database.")
     info("Just answer the questions and we'll do the rest.")
     print()
 
