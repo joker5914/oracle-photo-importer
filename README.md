@@ -65,9 +65,17 @@ If you happen to have two files for the same customer (like `1234567.jpg` **and*
 
 ## Where your settings are saved
 
-After your first run, the tool remembers your database settings (including the Envision password) in a file called `settings.json` next to the .exe.
+After your first run, the tool remembers your settings in two places:
 
-**Keep this file private** — it contains the Envision password. Don't share the folder with anyone you wouldn't share that password with. To clear your saved settings, just delete `settings.json` and the tool will ask for everything again next time.
+- **Server, port, service name, and last folder used** are saved to a file called `settings.json` next to the .exe. Nothing in this file is secret.
+- **The Envision password** is saved in **Windows Credential Manager** — the same encrypted vault Windows uses for saved Wi-Fi passwords and network logins. It's tied to your Windows user account, and only that account can read it back.
+
+To clear your saved settings:
+
+- Delete `settings.json` next to the .exe to forget the server / folder.
+- Open **Credential Manager** from the Start menu, find the entry called **`Customer Photo Importer`** under **Windows Credentials**, and remove it to forget the Envision password.
+
+Or just delete both — the tool will ask you for everything fresh next time.
 
 ## Re-running on the same photos
 
@@ -79,31 +87,51 @@ You can have Windows Task Scheduler run the importer for you on a schedule — s
 
 ### Step 1: Run the tool interactively at least once
 
-Run **`Customer.Photo.Importer.exe`** normally and let it import a folder of photos successfully. This saves your database settings (server, port, service name, Envision password) and the folder you picked. The scheduled task will reuse all of that.
+Run **`Customer.Photo.Importer.exe`** normally and let it import a folder of photos successfully. This:
+
+- Saves the database server, port, and service name to `settings.json`.
+- Saves the Envision password to Windows Credential Manager for **your Windows user account**.
+- Saves the folder you picked as the default for future runs.
+
+The scheduled task will reuse all of this.
 
 ### Step 2: Put the .exe somewhere permanent
 
-Move `Customer.Photo.Importer.exe` to a folder you won't accidentally clean up later — something like `C:\Tools\PhotoImporter\`. Make sure `settings.json` (created in step 1) lives in the same folder.
+Move `Customer.Photo.Importer.exe` to a folder you won't accidentally clean up later — something like `C:\Tools\PhotoImporter\`. Make sure `settings.json` (created in step 1) is in the same folder.
 
 ### Step 3: Create the scheduled task
 
 1. Open **Task Scheduler** (search for "Task Scheduler" in the Start menu).
-2. In the right-hand panel, click **Create Basic Task...**
-3. **Name:** *"Customer Photo Import"* (or whatever you like). Click **Next**.
-4. **Trigger:** Pick how often you want it to run (daily, weekly, on log-on, etc.). Click **Next**, set the time, and click **Next** again.
-5. **Action:** *"Start a program"*. Click **Next**.
-6. **Program/script:** the full path to the .exe, for example:
-   ```
-   C:\Tools\PhotoImporter\Customer.Photo.Importer.exe
-   ```
-7. **Add arguments (optional):** to make it run without any prompts, type:
-   ```
-   --unattended --folder "C:\incoming\photos"
-   ```
-   The `--unattended` flag tells the tool to skip all the prompts and use your saved settings. The `--folder` part is optional — if you leave it off, the tool will import from whatever folder you imported last time.
-8. Click **Next**, review the summary, then click **Finish**.
+2. In the right-hand panel, click **Create Task...** (use **Create Task**, not **Create Basic Task** — we need access to the "Run as" setting).
+3. **General tab:**
+   - **Name:** *"Customer Photo Import"* (or whatever you like).
+   - **Security options → When running the task, use the following user account:** **Pick the same Windows account you used in step 1.** This matters — the Envision password is tied to that account.
+   - **Run whether user is logged on or not** is fine; Windows will ask for that user's Windows login password when you save the task.
+4. **Triggers tab:** click **New...** and pick when you want it to run (daily, hourly, etc.), then **OK**.
+5. **Actions tab:** click **New...** and set:
+   - **Action:** *Start a program*
+   - **Program/script:**
+     ```
+     C:\Tools\PhotoImporter\Customer.Photo.Importer.exe
+     ```
+   - **Add arguments (optional):**
+     ```
+     --unattended --folder "C:\incoming\photos"
+     ```
+   - Click **OK**.
+6. Click **OK** to save the task. Windows will prompt for the password of the user the task runs as.
 
-That's it. The task will run on its schedule using the database settings you saved in step 1.
+That's it. The task will run on its schedule using the database settings and password you saved in step 1.
+
+### Important: same Windows account, end to end
+
+The Envision password lives in **Windows Credential Manager**, which keeps each user's secrets separate. So:
+
+- Whatever Windows account ran the tool interactively in step 1 is the account that has the password.
+- The scheduled task must run as **that same account** (set on the General tab).
+- It will **not** work if the task is set to run as **SYSTEM** or any other user — they have their own (empty) credential vaults and can't read the password.
+
+If the Envision password ever changes, run the tool interactively once again as that same user with the new password — it'll overwrite the saved one. The scheduled task picks up the new password automatically on its next run.
 
 ### Where to see what happened
 
@@ -118,7 +146,8 @@ Customer.Photo.Importer.exe [--unattended] [--folder PATH]
 
 Options:
   --unattended, --auto, -y    Run with no prompts. Requires saved settings
-                              from a previous interactive run.
+                              and the Envision password in Credential Manager
+                              for the user account running the tool.
   --folder PATH, -f PATH      Override the photo folder. Optional - if not
                               provided, the tool uses the last folder it
                               imported from.
@@ -130,20 +159,33 @@ Run `Customer.Photo.Importer.exe --help` for a full list of options.
 
 Useful if you want Task Scheduler to react differently to success vs failure (for example, send an email only on failure):
 
-| Code | Meaning                                              |
-|------|------------------------------------------------------|
-| 0    | Success (including "folder was empty, nothing to do") |
-| 1    | Unexpected error — check `photo_importer.log`        |
-| 2    | Missing settings, or `--folder` path doesn't exist   |
-| 3    | Could not connect to the database, or login failed  |
-| 4    | Import ran, but some individual photos failed       |
-| 130  | Cancelled by user (Ctrl+C)                          |
+| Code | Meaning                                                       |
+|------|---------------------------------------------------------------|
+| 0    | Success (including "folder was empty, nothing to do")          |
+| 1    | Unexpected error — check `photo_importer.log`                 |
+| 2    | Missing settings (or password not saved for this user)        |
+| 3    | Could not connect to the database, or login failed            |
+| 4    | Import ran, but some individual photos failed                 |
+| 130  | Cancelled by user (Ctrl+C)                                    |
 
 ---
 
 ## For IT / technical staff
 
 This tool is built in Python 3 using [`oracledb`](https://python-oracledb.readthedocs.io/) in *thin mode*, so no Oracle Instant Client needs to be installed on the operator's machine to make the connection (though one is required for `tnsnames.ora` auto-discovery to find anything useful). It works against Oracle 12.1 and newer, including 19c.
+
+### Credential storage
+
+The Envision password is stored in **Windows Credential Manager** (the Win32 Credential API) via the [`keyring`](https://pypi.org/project/keyring/) Python library. Specifically:
+
+- Service name: `Customer Photo Importer`
+- Username: `envision`
+- Visible to the user under **Control Panel → Credential Manager → Windows Credentials**.
+- Encrypted via the Windows Data Protection API (DPAPI), scoped to the Windows user account that wrote it. Other users on the same machine cannot read it.
+
+The non-secret settings (server, port, service name, last folder) live in `settings.json` next to the .exe.
+
+**Migration:** if an older `settings.json` is found with a plaintext `password` field (from before keyring integration), the tool silently moves the password into Credential Manager on first load and rewrites `settings.json` without it. No operator action required.
 
 ### Auto-discovery of Oracle settings
 
@@ -162,7 +204,7 @@ Resolved settings are saved to `settings.json` (next to the .exe), so subsequent
 When `--unattended` (or `--auto`, or `-y`) is on the command line:
 
 - **Argv is pre-scanned at module load** before the loading banner prints, so unattended runs don't pollute Task Scheduler logs with interactive UI noise.
-- **All interactive prompts are skipped.** The tool reads the connection settings out of `settings.json`; if any of `server`, `port`, `service`, or `password` are missing it exits with code 2 and a clear log message instead of prompting.
+- **All interactive prompts are skipped.** The tool reads the connection settings out of `settings.json` and the password from Credential Manager. If any of `server`, `port`, `service`, or `password` are missing it exits with code 2 and a clear log message instead of prompting.
 - **No folder picker.** The folder comes from `--folder` if provided, otherwise from `settings.last_folder`. If neither exists, exit 2.
 - **No "ready to import?" confirmation.** The tool proceeds as soon as it has a folder.
 - **The `tqdm` progress bar is disabled** (`disable=True`), since Task Scheduler may run without an attached console.
@@ -175,8 +217,16 @@ An empty folder is treated as success (exit 0), since for a recurring task that'
 The `.github/workflows/build.yml` GitHub Actions workflow runs on every push to `main` and:
 
 1. Sets up Python 3.12 on a `windows-latest` runner.
-2. Installs `oracledb`, `tqdm`, `cryptography`, and `pyinstaller`.
-3. Bundles the script with `pyinstaller --onefile --name "Customer Photo Importer" --collect-all oracledb --collect-all cryptography photo_importer.py`.
+2. Installs `oracledb`, `tqdm`, `cryptography`, `keyring`, and `pyinstaller`.
+3. Bundles the script with:
+   ```
+   pyinstaller --onefile --name "Customer Photo Importer"
+     --collect-all oracledb
+     --collect-all cryptography
+     --collect-all keyring
+     --hidden-import keyring.backends.Windows
+     photo_importer.py
+   ```
 4. Publishes the resulting `.exe` to the **`rolling`** release, marked as Latest.
 
 Operators always download from:
@@ -200,7 +250,7 @@ python photo_importer.py --unattended --folder "C:\incoming\photos"
 ### How it works
 
 - The Oracle username is hardcoded to **`envision`** (constant `ENVISION_USER` at the top of `photo_importer.py`). To change the account, edit that single line.
-- The Python script is fully interactive by default: it auto-discovers Oracle settings (see above), prompts for the `envision` password, opens a tkinter folder-picker dialog, and saves the answers to `settings.json` so subsequent runs only need a single confirmation. With `--unattended`, every prompt is skipped and the tool fails fast on missing settings.
+- The Python script is fully interactive by default: it auto-discovers Oracle settings (see above), prompts for the `envision` password, opens a tkinter folder-picker dialog, and saves the answers (password to Credential Manager, the rest to `settings.json`). Subsequent runs only need a single confirmation. With `--unattended`, every prompt is skipped and the tool fails fast on missing settings.
 - When running as a PyInstaller bundle, `settings.json` and `photo_importer.log` live next to the .exe (resolved via `sys.executable`), not in the temporary unpacked directory.
 - A loading banner prints at the top of `photo_importer.py` before any heavy imports, so the operator sees friendly text the instant Python starts (avoiding the appearance of a frozen console while the .exe unpacks itself). The banner is suppressed in unattended mode.
 - File scanner accepts both `.jpg` and `.jpeg` (case-insensitive). They contain identical JPEG image data, so no conversion is performed — the bytes are written directly as a BLOB.

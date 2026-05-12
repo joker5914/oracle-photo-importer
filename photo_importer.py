@@ -12,7 +12,8 @@ details.
 The Oracle username is fixed (the shared 'envision' account); operators
 only need to know its password. The database server, port, and service
 name are auto-detected from any tnsnames.ora file found on the local
-machine.
+machine. The Envision password is stored in Windows Credential Manager
+(per-user), not in any file on disk.
 """
 from __future__ import annotations
 
@@ -87,6 +88,15 @@ except ImportError:
         "  Close this window and run 'Start Photo Importer' again to set things up."
     )
 
+try:
+    import keyring
+    from keyring.errors import KeyringError
+except ImportError:
+    _die_friendly(
+        "A required component (keyring) isn't installed yet.\n"
+        "  Close this window and run 'Start Photo Importer' again to set things up."
+    )
+
 
 def _get_script_dir() -> Path:
     """Return the directory where settings and logs should live.
@@ -120,6 +130,10 @@ EXIT_INTERRUPTED = 130    # Ctrl+C / cancel
 # tool knows the shared password for this account, so only the password
 # needs to be asked for at runtime.
 ENVISION_USER = "envision"
+
+# Name shown for this tool's entry in Windows Credential Manager.
+# Visible under Control Panel > Credential Manager > Windows Credentials.
+KEYRING_SERVICE = "Customer Photo Importer"
 
 # Accepted photo file extensions. .jpg and .jpeg hold the exact same JPEG
 # image data, so the tool treats them identically. Case is ignored.
@@ -181,8 +195,9 @@ def parse_args() -> argparse.Namespace:
         dest="unattended",
         help=(
             "Run with no prompts. Requires saved settings (server, port, "
-            "service, password) from a previous interactive run. Fails fast "
-            "with a non-zero exit code on any error."
+            "service) and the Envision password in Windows Credential Manager "
+            "for the user account running the tool. Fails fast with a non-zero "
+            "exit code on any error."
         ),
     )
     parser.add_argument(
@@ -266,9 +281,46 @@ def ask_choice(prompt: str, max_choice: int, default: int = 1) -> int:
 
 # ============================================================================
 # Saved settings
+#
+# Non-secret settings (server, port, service, last_folder) live in
+# settings.json next to the .exe.
+#
+# The Envision password lives in Windows Credential Manager under the
+# service name 'Customer Photo Importer' and the username 'envision'.
+# It is per-user: only the Windows account that saved it can read it back.
 # ============================================================================
 
+def _load_password_from_keyring() -> Optional[str]:
+    """Fetch the saved Envision password from Windows Credential Manager."""
+    try:
+        return keyring.get_password(KEYRING_SERVICE, ENVISION_USER)
+    except KeyringError as exc:
+        LOG.warning("Could not read password from Credential Manager: %s", exc)
+        return None
+
+
+def _save_password_to_keyring(password: str) -> bool:
+    """Store the Envision password in Windows Credential Manager.
+
+    Returns True on success, False if the keyring backend rejected the call.
+    """
+    try:
+        keyring.set_password(KEYRING_SERVICE, ENVISION_USER, password)
+        return True
+    except KeyringError as exc:
+        LOG.warning("Could not save password to Credential Manager: %s", exc)
+        return False
+
+
 def load_settings() -> Dict[str, str]:
+    """Load saved settings, fetching the password from Credential Manager.
+
+    Also handles the one-time migration from the old plaintext-password
+    settings.json schema: if a 'password' field is found in settings.json,
+    it's moved into Credential Manager and stripped from the file.
+    """
+    settings: Dict[str, str] = {}
+
     if SETTINGS_FILE.exists():
         try:
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -276,19 +328,53 @@ def load_settings() -> Dict[str, str]:
                 # Strip any legacy 'user' field; the username is always
                 # ENVISION_USER now.
                 data.pop("user", None)
-                return data
+                settings = data
         except Exception as exc:
             LOG.warning("Could not read settings file: %s", exc)
-    return {}
+
+    # Migrate legacy plaintext password (from before keyring integration)
+    # into Windows Credential Manager.
+    legacy_password = settings.pop("password", None)
+    if legacy_password:
+        LOG.info(
+            "Migrating Envision password from settings.json to Windows "
+            "Credential Manager"
+        )
+        if _save_password_to_keyring(legacy_password):
+            # Re-save settings.json without the password field.
+            _write_settings_file(settings)
+        else:
+            # Keyring rejected the write - keep the password in memory for
+            # this run so the operator isn't dead in the water.
+            settings["password"] = legacy_password
+            return settings
+
+    # Fetch the password from Credential Manager.
+    pw = _load_password_from_keyring()
+    if pw:
+        settings["password"] = pw
+
+    return settings
 
 
-def save_settings(settings: Dict[str, str]) -> None:
-    # Don't persist the username; it's fixed.
-    to_save = {k: v for k, v in settings.items() if k != "user"}
+def _write_settings_file(settings: Dict[str, str]) -> None:
+    """Write the non-secret settings to settings.json on disk."""
+    to_save = {
+        k: v for k, v in settings.items()
+        if k not in ("user", "password")
+    }
     try:
         SETTINGS_FILE.write_text(json.dumps(to_save, indent=2), encoding="utf-8")
     except OSError as exc:
         LOG.warning("Could not save settings file: %s", exc)
+
+
+def save_settings(settings: Dict[str, str]) -> None:
+    """Save settings: password to Credential Manager, the rest to settings.json."""
+    password = settings.get("password")
+    if password:
+        _save_password_to_keyring(password)
+    _write_settings_file(settings)
 
 
 # ============================================================================
@@ -868,7 +954,17 @@ def _run_app(args: argparse.Namespace) -> int:
                 "Unattended mode is missing required setting(s): "
                 + ", ".join(missing_settings)
             )
-            info("Run the tool interactively once first to save them.")
+            if "password" in missing_settings:
+                info("")
+                info("The Envision password isn't saved for this Windows user.")
+                info("")
+                info("To fix this:")
+                info("  - Run the tool interactively once as the SAME Windows")
+                info("    account that the scheduled task runs as. The password")
+                info("    will be saved to that account's Credential Manager.")
+                info("  - Then the scheduled task can read it back.")
+            else:
+                info("Run the tool interactively once first to save them.")
             LOG.error("Unattended run missing required settings: %s", missing_settings)
             return EXIT_BAD_CONFIG
         settings = dict(saved)
