@@ -4,6 +4,9 @@
 A simple, interactive tool that imports customer photos into an Oracle 19c
 database. Walks the operator through every step in plain language; no
 command-line flags or config-file editing required.
+
+The Oracle username is fixed (the shared 'envision' account); operators
+only need to know its password.
 """
 from __future__ import annotations
 
@@ -51,6 +54,11 @@ SETTINGS_FILE = SCRIPT_DIR / "settings.json"
 LOG_FILE = SCRIPT_DIR / "photo_importer.log"
 LOG = logging.getLogger("photo_importer")
 BATCH_SIZE = 50
+
+# The Oracle account this tool always logs in as. Everyone who uses the
+# tool knows the shared password for this account, so only the password
+# needs to be asked for at runtime.
+ENVISION_USER = "envision"
 
 # Accepted photo file extensions. .jpg and .jpeg hold the exact same JPEG
 # image data, so the tool treats them identically. Case is ignored.
@@ -138,6 +146,9 @@ def load_settings() -> Dict[str, str]:
         try:
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
+                # Strip any legacy 'user' field; the username is always
+                # ENVISION_USER now.
+                data.pop("user", None)
                 return data
         except Exception as exc:
             LOG.warning("Could not read settings file: %s", exc)
@@ -145,8 +156,10 @@ def load_settings() -> Dict[str, str]:
 
 
 def save_settings(settings: Dict[str, str]) -> None:
+    # Don't persist the username; it's fixed.
+    to_save = {k: v for k, v in settings.items() if k != "user"}
     try:
-        SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        SETTINGS_FILE.write_text(json.dumps(to_save, indent=2), encoding="utf-8")
     except OSError as exc:
         LOG.warning("Could not save settings file: %s", exc)
 
@@ -196,14 +209,15 @@ def setup_wizard(saved: Dict[str, str]) -> Dict[str, str]:
         "Database service name (example: ORCLPDB1)",
         default=saved.get("service"),
     )
-    user = ask("Your database username", default=saved.get("user"))
-    password = ask("Your database password", password=True)
+    password = ask(
+        f"Password for the '{ENVISION_USER}' database account",
+        password=True,
+    )
 
     return {
         "server": server,
         "port": port,
         "service": service,
-        "user": user,
         "password": password,
     }
 
@@ -217,11 +231,11 @@ def explain_db_error(exc: BaseException) -> None:
     lower = text.lower()
 
     if "ora-01017" in lower:
-        info("The database says the username or password is wrong.")
+        info(f"The database says the password for the '{ENVISION_USER}' account is wrong.")
         info("")
         info("  - Make sure Caps Lock is off.")
         info("  - Type the password carefully (the letters are hidden as you type).")
-        info("  - If your password was recently changed, use the new one.")
+        info(f"  - If the '{ENVISION_USER}' password was recently changed, use the new one.")
     elif "ora-12514" in lower or "ora-12505" in lower:
         info("The database server answered, but it doesn't recognize the")
         info("service name you entered.")
@@ -265,9 +279,7 @@ def _stem_key(path: Path) -> str:
         return path.stem.lower()
 
 
-def scan_photo_folder(
-    folder_path: Path,
-) -> Tuple[List[Path], int]:
+def scan_photo_folder(folder_path: Path) -> Tuple[List[Path], int]:
     """Find photos in the folder and de-duplicate by customer number.
 
     Accepts both .jpg and .jpeg (case-insensitive). If two files share the
@@ -452,8 +464,8 @@ def _run_app() -> int:
     saved = load_settings()
 
     # ---- Step 1: connection settings ----
-    if saved.get("server") and saved.get("user") and saved.get("password"):
-        info(f"Last time you connected as '{saved['user']}' to '{saved['server']}'.")
+    if saved.get("server") and saved.get("password"):
+        info(f"Last time you connected to '{saved['server']}'.")
         if ask_yes_no("Use the same database settings as last time?", default=True):
             settings = dict(saved)
         else:
@@ -466,10 +478,10 @@ def _run_app() -> int:
 
     # ---- Step 2: test the connection ----
     section("Connecting to the database")
-    info(f"Connecting to {settings['server']} ...")
+    info(f"Connecting to {settings['server']} as '{ENVISION_USER}' ...")
     try:
         conn = oracledb.connect(
-            user=settings["user"],
+            user=ENVISION_USER,
             password=settings["password"],
             dsn=dsn,
         )

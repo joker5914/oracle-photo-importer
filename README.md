@@ -6,8 +6,9 @@ A tool that copies a folder of customer photos from your computer into the Oracl
 
 1. **A Windows computer** (Mac and Linux work too, but this guide is written for Windows).
 2. **Python** installed on the computer. If it isn't, the tool tells you exactly how to get it (it's free and takes about 2 minutes).
-3. **Your database login** — the server address, your username, and your password. Your database administrator can give you these if you don't know them.
-4. **A folder full of photos.** Each photo file has to be named with the customer's number plus `.jpg` or `.jpeg`. For example, customer number `1234567` would be saved as `1234567.jpg` (or `1234567.jpeg` — both work).
+3. **The Envision database password.** The tool always logs in to the database as the shared `envision` account, so you don't need to enter a username — just the password for that account. Anyone on your team who uses this tool should already know it; if not, ask your database administrator.
+4. **The database server address.** This is the server's name or IP address (your IT person can tell you). You may also need the port number and service name the first time, but you can use the defaults if you're not sure.
+5. **A folder full of photos.** Each photo file has to be named with the customer's number plus `.jpg` or `.jpeg`. For example, customer number `1234567` would be saved as `1234567.jpg` (or `1234567.jpeg` — both work).
 
 ## How to install (just once)
 
@@ -25,7 +26,7 @@ Double-click **`Start Photo Importer`**.
 
 The tool asks a few simple questions:
 
-1. **The first time only:** it asks for your database server, port, service name, username, and password. After that, it remembers them and just asks *"Use the same settings as last time?"*.
+1. **The first time only:** it asks for your database server, port, service name, and the password for the **`envision`** account. After that, it remembers them and just asks *"Use the same settings as last time?"*.
 2. **It tests your login.** If something is wrong, it tells you exactly what to check in plain English.
 3. **A pop-up window opens** so you can browse to the folder with your photos. Click the folder and click **Select Folder**.
 4. **It tells you how many photos it found** and asks if you want to go ahead.
@@ -39,7 +40,7 @@ Press Enter to close the window when you're finished.
 The tool explains common problems in plain English. The most likely ones:
 
 - **"Could not connect to the database"** — You may not be connected to the office network or VPN. Check that first. Also double-check the server name and port.
-- **"Username or password is wrong"** — Type them again carefully. The password letters are hidden as you type, so typos are easy.
+- **"Password for the 'envision' account is wrong"** — Type it again carefully. The password letters are hidden as you type, so typos are easy. If the Envision password was recently changed, use the new one.
 - **"None of the photo file names match any customer numbers"** — Check that each photo's file name is just the customer's number, like `1234567.jpg`. Names with letters in them, or extra words, won't work.
 
 If something else goes wrong, the tool writes the technical details to a file called **`photo_importer.log`** in the same folder. If you need help, send that file to your IT person.
@@ -61,9 +62,9 @@ If you happen to have two files for the same customer (like `1234567.jpg` **and*
 
 ## Where your settings are saved
 
-After your first run, the tool remembers your database settings (including the password) in a file called `settings.json` in the same folder as the tool.
+After your first run, the tool remembers your database settings (including the Envision password) in a file called `settings.json` in the same folder as the tool.
 
-**Keep this file private** — it contains your database password. Don't share the folder with anyone you wouldn't share your password with. To clear your saved settings, just delete `settings.json` and the tool will ask for everything again next time.
+**Keep this file private** — it contains the Envision password. Don't share the folder with anyone you wouldn't share that password with. To clear your saved settings, just delete `settings.json` and the tool will ask for everything again next time.
 
 ## Re-running on the same photos
 
@@ -78,7 +79,8 @@ This tool is built in Python 3 using [`oracledb`](https://python-oracledb.readth
 **How it works:**
 
 - `Start Photo Importer.bat` finds Python (or walks the user through installing it), creates a `.venv\`, installs `oracledb` and `tqdm`, then launches `photo_importer.py`.
-- The Python script is fully interactive: it prompts for credentials, opens a tkinter folder-picker dialog, and saves answers (yes, including the password) to `settings.json` so subsequent runs only need a single confirmation.
+- The Oracle username is hardcoded to **`envision`** (constant `ENVISION_USER` at the top of `photo_importer.py`). To change the account, edit that single line.
+- The Python script is fully interactive: it prompts for the server / port / service / password, opens a tkinter folder-picker dialog, and saves the answers to `settings.json` (minus the username, which is fixed) so subsequent runs only need a single confirmation.
 - File scanner accepts both `.jpg` and `.jpeg` (case-insensitive). They contain identical JPEG image data, so no conversion is performed — the bytes are written directly as a BLOB.
 - If two files resolve to the same customer number (e.g. `1234567.jpg` and `1234567.jpeg`, or `001234.jpg` and `1234.jpeg`), the `.jpg` variant wins and the other is logged and skipped.
 - Customer-number lookups against `CUSTOMER.CUSTOMERNUMBER` are done in chunks of up to 1000 in a single query each.
@@ -91,7 +93,7 @@ This tool is built in Python 3 using [`oracledb`](https://python-oracledb.readth
 
 If you'd rather hand teammates a single `.exe`, run `build_exe.bat` (after `Start Photo Importer.bat` has been run at least once to set up the venv). The output is `dist\photo_importer.exe` — a standalone binary that still uses `settings.json` from the working directory.
 
-**Required Oracle privileges:**
+**Required Oracle privileges (for the `envision` account):**
 
 - `SELECT` on `CUSTOMER`
 - `INSERT`, `UPDATE` on `CUSTOMER_PHOTO`
