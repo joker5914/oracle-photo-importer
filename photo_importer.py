@@ -6,7 +6,9 @@ database. Walks the operator through every step in plain language; no
 command-line flags or config-file editing required.
 
 The Oracle username is fixed (the shared 'envision' account); operators
-only need to know its password.
+only need to know its password. The database server, port, and service
+name are auto-detected from any tnsnames.ora file found on the local
+machine.
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ import getpass
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -150,6 +153,21 @@ def ask_yes_no(prompt: str, default: bool = True) -> bool:
         print("  Please type Y for yes or N for no.")
 
 
+def ask_choice(prompt: str, max_choice: int, default: int = 1) -> int:
+    """Ask the user to pick a number between 1 and ``max_choice``."""
+    while True:
+        val = input(f"  {prompt}  [{default}]: ").strip()
+        if not val:
+            return default
+        try:
+            n = int(val)
+            if 1 <= n <= max_choice:
+                return n
+        except ValueError:
+            pass
+        print(f"  Please enter a number between 1 and {max_choice}.")
+
+
 # ============================================================================
 # Saved settings
 # ============================================================================
@@ -204,10 +222,269 @@ def pick_folder_dialog(initial: Optional[str] = None) -> Optional[str]:
 
 
 # ============================================================================
-# Setup wizard
+# Oracle TNS auto-discovery
+# ============================================================================
+
+def _extract_tns_param(body: str, name: str) -> Optional[str]:
+    """Find a ``NAME = value`` pattern within a TNS connect-description body."""
+    pattern = rf"\b{re.escape(name)}\s*=\s*([^\s)(]+)"
+    match = re.search(pattern, body, re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def parse_tnsnames(path: Path) -> Dict[str, Dict[str, str]]:
+    """Parse a tnsnames.ora file into ``{alias: {host, port, service}}``.
+
+    Tolerant parser: handles balanced parentheses, line comments, multi-alias
+    entries (``A, B = ...``), both ``SERVICE_NAME`` and ``SID``, and skips
+    malformed entries instead of aborting on them.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+
+    # Strip line comments (# ... end-of-line).
+    text = re.sub(r"#[^\n]*", "", text)
+    # Strip IFILE directives (we don't follow includes).
+    text = re.sub(r"IFILE\s*=\s*[^\n]+", "", text, flags=re.IGNORECASE)
+
+    entries: Dict[str, Dict[str, str]] = {}
+    pos = 0
+    n = len(text)
+
+    while pos < n:
+        # Skip whitespace
+        while pos < n and text[pos] in " \t\r\n":
+            pos += 1
+        if pos >= n:
+            break
+
+        # Read alias name(s) up to '=' or '('
+        alias_start = pos
+        while pos < n and text[pos] not in "=(":
+            pos += 1
+        alias_raw = text[alias_start:pos].strip()
+
+        # Skip '=' and following whitespace
+        if pos < n and text[pos] == "=":
+            pos += 1
+        while pos < n and text[pos] in " \t\r\n":
+            pos += 1
+
+        if pos >= n or text[pos] != "(":
+            # Not a real TNS entry; advance to next line and continue.
+            while pos < n and text[pos] != "\n":
+                pos += 1
+            continue
+
+        # Read balanced parentheses
+        depth = 0
+        body_start = pos
+        while pos < n:
+            c = text[pos]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    pos += 1
+                    break
+            pos += 1
+        body = text[body_start:pos]
+
+        if not alias_raw:
+            continue
+
+        host = _extract_tns_param(body, "HOST")
+        port = _extract_tns_param(body, "PORT")
+        service = (
+            _extract_tns_param(body, "SERVICE_NAME")
+            or _extract_tns_param(body, "SID")
+        )
+        if not (host and port and service):
+            continue
+
+        # Handle multi-alias entries like "A, B, C = (...)"
+        for alias in (a.strip() for a in alias_raw.split(",")):
+            if not re.match(r"^[A-Za-z][\w.\-]*$", alias):
+                continue
+            entries[alias] = {
+                "host": host,
+                "port": port,
+                "service": service,
+            }
+
+    return entries
+
+
+def find_tnsnames_files() -> List[Path]:
+    """Locate every tnsnames.ora file we can find on this machine."""
+    found: List[Path] = []
+
+    # 1. Environment variables (most authoritative when set)
+    tns_admin = os.environ.get("TNS_ADMIN")
+    if tns_admin:
+        p = Path(tns_admin) / "tnsnames.ora"
+        if p.is_file():
+            found.append(p)
+
+    oracle_home = os.environ.get("ORACLE_HOME")
+    if oracle_home:
+        p = Path(oracle_home) / "network" / "admin" / "tnsnames.ora"
+        if p.is_file():
+            found.append(p)
+
+    # 2. Common Windows Oracle install roots
+    roots: List[Path] = [
+        Path(r"C:\app"),
+        Path(r"C:\oracle"),
+        Path(r"C:\Oracle"),
+        Path(r"C:\oraclexe"),
+        Path(r"C:\OracleClient"),
+        Path(r"C:\OracleInstantClient"),
+        Path(r"C:\instantclient"),
+        Path(r"C:\Program Files\Oracle"),
+        Path(r"C:\Program Files (x86)\Oracle"),
+        Path(r"C:\Transact"),
+        Path(r"C:\CBORD"),
+    ]
+
+    # Also check D:, E:, F:, ... for similarly named folders
+    for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+        drive = Path(f"{letter}:\\")
+        try:
+            if not drive.exists():
+                continue
+        except OSError:
+            continue
+        for sub in ("app", "oracle", "Oracle", "OracleClient"):
+            roots.append(drive / sub)
+
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            for tns in root.rglob("tnsnames.ora"):
+                if tns.is_file():
+                    found.append(tns)
+        except (PermissionError, OSError):
+            continue
+
+    # Deduplicate by resolved path while preserving order.
+    seen = set()
+    unique: List[Path] = []
+    for p in found:
+        try:
+            rp = p.resolve()
+        except (OSError, RuntimeError):
+            rp = p
+        if rp in seen:
+            continue
+        seen.add(rp)
+        unique.append(p)
+    return unique
+
+
+def discover_oracle_connections() -> List[Dict[str, str]]:
+    """Return a deduplicated list of Oracle connections defined on this machine.
+
+    Each dict has keys: ``alias``, ``host``, ``port``, ``service``, ``source``.
+    Multiple aliases pointing at the same host:port/service collapse to one.
+    """
+    files = find_tnsnames_files()
+    connections: List[Dict[str, str]] = []
+    seen_keys = set()
+
+    for path in files:
+        try:
+            entries = parse_tnsnames(path)
+        except Exception as exc:
+            LOG.warning("Failed to parse %s: %s", path, exc)
+            continue
+
+        for alias, details in entries.items():
+            key = (
+                details["host"].lower(),
+                str(details["port"]),
+                details["service"].lower(),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            connections.append({
+                "alias": alias,
+                "host": details["host"],
+                "port": str(details["port"]),
+                "service": details["service"],
+                "source": str(path),
+            })
+
+    return connections
+
+
+# ============================================================================
+# Setup wizards
 # ============================================================================
 
 def setup_wizard(saved: Dict[str, str]) -> Dict[str, str]:
+    """Set up the database connection. Tries auto-discovery first."""
+    section("Finding your database")
+    info("Looking for Oracle settings on this computer...")
+
+    try:
+        connections = discover_oracle_connections()
+    except Exception as exc:
+        LOG.warning("TNS discovery failed: %s", exc)
+        connections = []
+
+    if not connections:
+        info("Couldn't find Oracle settings automatically on this computer.")
+        print()
+        return manual_setup_wizard(saved)
+
+    if len(connections) == 1:
+        c = connections[0]
+        info("Found your database:")
+        info(f"  Server:  {c['host']}")
+        info(f"  Port:    {c['port']}")
+        info(f"  Service: {c['service']}")
+        chosen = c
+    else:
+        info(f"Found {len(connections)} Oracle database(s) on this computer:")
+        print()
+        for i, c in enumerate(connections, 1):
+            print(f"     {i}. {c['alias']}  ->  {c['host']}:{c['port']}/{c['service']}")
+        print(f"     {len(connections) + 1}. (None of these - enter settings manually)")
+        print()
+        choice = ask_choice(
+            "Which database do you want to use?",
+            max_choice=len(connections) + 1,
+            default=1,
+        )
+        if choice == len(connections) + 1:
+            print()
+            return manual_setup_wizard(saved)
+        chosen = connections[choice - 1]
+
+    print()
+    password = ask(
+        f"Password for the '{ENVISION_USER}' database account",
+        password=True,
+    )
+
+    return {
+        "server": chosen["host"],
+        "port": str(chosen["port"]),
+        "service": chosen["service"],
+        "password": password,
+    }
+
+
+def manual_setup_wizard(saved: Dict[str, str]) -> Dict[str, str]:
+    """Fallback when auto-discovery doesn't find a usable tnsnames.ora."""
     section("Database connection")
     info("Please tell me how to connect to your Oracle database.")
     info("If you don't know any of these, ask your database administrator.")
@@ -251,7 +528,7 @@ def explain_db_error(exc: BaseException) -> None:
         info(f"  - If the '{ENVISION_USER}' password was recently changed, use the new one.")
     elif "ora-12514" in lower or "ora-12505" in lower:
         info("The database server answered, but it doesn't recognize the")
-        info("service name you entered.")
+        info("service name from your Oracle settings.")
         info("")
         info("  - Double-check the service name (often something like ORCLPDB1).")
         info("  - Ask your database administrator if you're not sure.")
@@ -264,9 +541,9 @@ def explain_db_error(exc: BaseException) -> None:
     ):
         info("Could not reach the database server. This usually means:")
         info("")
-        info("  - The server name or port number is wrong, OR")
         info("  - This computer isn't on the office network / VPN, OR")
-        info("  - The database server is currently down.")
+        info("  - The database server is currently down, OR")
+        info("  - Your Oracle settings point to the wrong server.")
         info("")
         info("Check those, then start the tool again.")
     else:
@@ -484,7 +761,6 @@ def _run_app() -> int:
         else:
             settings = setup_wizard(saved)
     else:
-        section("First-time setup")
         settings = setup_wizard(saved)
 
     dsn = f"{settings['server']}:{settings['port']}/{settings['service']}"

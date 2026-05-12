@@ -18,8 +18,9 @@ The tool opens in a window and walks you through everything from there.
 ## What you need before you start
 
 - **The Envision database password.** The tool always logs in as the shared **`envision`** account, so you don't need to enter a username — just the password. Anyone on your team who uses this tool should already know it; if not, ask your database administrator.
-- **The database server address.** Your IT person can tell you (it's usually something like `db.company.com` or an IP address).
 - **A folder full of photos.** Each photo file has to be named with the customer's number plus `.jpg` or `.jpeg`. For example, customer number `1234567` should be saved as `1234567.jpg` (or `1234567.jpeg` — both work).
+
+The tool finds your database settings automatically by looking for the Oracle client that's already installed on this computer. If it can't find one, it'll ask you for the server address, port, and service name. Your IT person can tell you those.
 
 ## How to use it
 
@@ -27,7 +28,7 @@ Double-click **Customer Photo Importer.exe**.
 
 The tool asks a few simple questions:
 
-1. **The first time only:** it asks for your database server, port (the default is usually fine), service name, and the Envision password. After that, it remembers them and just asks *"Use the same settings as last time?"*.
+1. **The first time only:** it scans this computer for the Oracle settings (server, port, service name). When it finds them, it just asks for the Envision password. If multiple databases are configured, it shows a numbered list so you can pick the right one. After that, it remembers your choice and just asks *"Use the same settings as last time?"*.
 2. **It tests your login.** If something is wrong, it tells you exactly what to check in plain English.
 3. **A pop-up window opens** so you can browse to the folder with your photos. Click the folder and click **Select Folder**.
 4. **It tells you how many photos it found** and asks if you want to go ahead.
@@ -40,8 +41,9 @@ Press Enter to close the window when you're finished.
 
 The tool explains common problems in plain English. The most likely ones:
 
-- **"Could not connect to the database"** — You may not be connected to the office network or VPN. Check that first. Also double-check the server name and port.
+- **"Could not connect to the database"** — You may not be connected to the office network or VPN. Check that first.
 - **"Password for the 'envision' account is wrong"** — Type it again carefully. The password letters are hidden as you type, so typos are easy. If the Envision password was recently changed, use the new one.
+- **"Couldn't find Oracle settings automatically"** — The tool couldn't locate a `tnsnames.ora` file on this computer. It'll fall back to asking you for the server, port, and service name. Your IT person can provide them.
 - **"None of the photo file names match any customer numbers"** — Check that each photo's file name is just the customer's number, like `1234567.jpg`. Names with letters in them, or extra words, won't work.
 
 If something else goes wrong, the tool writes the technical details to a file called **`photo_importer.log`** right next to the .exe. If you need help, send that file to your IT person.
@@ -75,16 +77,28 @@ It's safe to run the tool again on the same folder. If a customer already has a 
 
 ## For IT / technical staff
 
-This tool is built in Python 3 using [`oracledb`](https://python-oracledb.readthedocs.io/) in *thin mode*, so no Oracle Instant Client needs to be installed on the operator's machine. It works against Oracle 12.1 and newer, including 19c.
+This tool is built in Python 3 using [`oracledb`](https://python-oracledb.readthedocs.io/) in *thin mode*, so no Oracle Instant Client needs to be installed on the operator's machine to make the connection (though one is required for `tnsnames.ora` auto-discovery to find anything useful). It works against Oracle 12.1 and newer, including 19c.
+
+### Auto-discovery of Oracle settings
+
+On first run, the tool resolves the database connection details automatically using this lookup chain:
+
+1. `%TNS_ADMIN%\tnsnames.ora`
+2. `%ORACLE_HOME%\network\admin\tnsnames.ora`
+3. Recursive scan of common Windows Oracle install roots: `C:\app`, `C:\Oracle`, `C:\oracle`, `C:\oraclexe`, `C:\OracleClient`, `C:\OracleInstantClient`, `C:\instantclient`, `C:\Program Files\Oracle`, `C:\Program Files (x86)\Oracle`, `C:\Transact`, `C:\CBORD`, and the same on other fixed drive letters.
+
+For each `tnsnames.ora` found, a tolerant parser extracts `HOST`, `PORT`, and `SERVICE_NAME` (or `SID`) from every connect descriptor it can parse. Multi-alias entries (`A, B = (...)`) are expanded, and connections that resolve to the same `host:port/service` are collapsed. If there's exactly one connection, it's used silently; if multiple, the operator picks from a numbered list. If none, the tool falls back to a manual setup wizard.
+
+Resolved settings are saved to `settings.json` (next to the .exe), so subsequent runs skip discovery entirely.
 
 ### Distribution
 
 The `.github/workflows/build.yml` GitHub Actions workflow runs on every push to `main` and:
 
 1. Sets up Python 3.12 on a `windows-latest` runner.
-2. Installs `oracledb`, `tqdm`, and `pyinstaller`.
-3. Bundles the script with `pyinstaller --onefile --name "Customer Photo Importer" --collect-all oracledb photo_importer.py`.
-4. Publishes the resulting `.exe` to the **`latest`** release.
+2. Installs `oracledb`, `tqdm`, `cryptography`, and `pyinstaller`.
+3. Bundles the script with `pyinstaller --onefile --name "Customer Photo Importer" --collect-all oracledb --collect-all cryptography photo_importer.py`.
+4. Publishes the resulting `.exe` to the **rolling** release, marked as Latest.
 
 Operators always download from `https://github.com/joker5914/oracle-photo-importer/releases/latest/download/Customer%20Photo%20Importer.exe`, which the GitHub redirect resolves to the most recent build.
 
@@ -97,7 +111,7 @@ Clone the repo, double-click `Start Photo Importer.bat`. It creates a `.venv\`, 
 ### How it works
 
 - The Oracle username is hardcoded to **`envision`** (constant `ENVISION_USER` at the top of `photo_importer.py`). To change the account, edit that single line.
-- The Python script is fully interactive: it prompts for the server / port / service / password, opens a tkinter folder-picker dialog, and saves the answers to `settings.json` (minus the username, which is fixed) so subsequent runs only need a single confirmation.
+- The Python script is fully interactive: it auto-discovers Oracle settings (see above), prompts for the `envision` password, opens a tkinter folder-picker dialog, and saves the answers to `settings.json` so subsequent runs only need a single confirmation.
 - When running as a PyInstaller bundle, `settings.json` and `photo_importer.log` live next to the .exe (resolved via `sys.executable`), not in the temporary unpacked directory.
 - File scanner accepts both `.jpg` and `.jpeg` (case-insensitive). They contain identical JPEG image data, so no conversion is performed — the bytes are written directly as a BLOB.
 - If two files resolve to the same customer number (e.g. `1234567.jpg` and `1234567.jpeg`, or `001234.jpg` and `1234.jpeg`), the `.jpg` variant wins and the other is logged and skipped.
