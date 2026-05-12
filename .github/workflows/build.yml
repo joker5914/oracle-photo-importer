@@ -38,10 +38,10 @@ jobs:
           path: "dist/Customer Photo Importer.exe"
           if-no-files-found: error
 
-      - name: Publish to 'latest' release
+      - name: Publish to 'rolling' release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
+          tag_name: rolling
           name: Latest build
           body: |
             ## Customer Photo Importer — latest build
