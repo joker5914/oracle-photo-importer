@@ -17,7 +17,7 @@ if not exist ".venv\Scripts\activate.bat" (
 
 call ".venv\Scripts\activate.bat"
 python -m pip install pyinstaller
-pyinstaller --onefile --name "Customer Photo Importer" --collect-all oracledb photo_importer.py
+pyinstaller --onefile --name "Customer Photo Importer" --collect-all oracledb --collect-all cryptography photo_importer.py
 if errorlevel 1 (
     echo.
     echo  PyInstaller build failed.
