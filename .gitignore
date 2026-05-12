@@ -16,9 +16,8 @@ venv/
 env/
 ENV/
 
-# Environment / secrets
-.env
-*.env.local
+# Saved settings (contains the user's database password)
+settings.json
 
 # Logs
 *.log

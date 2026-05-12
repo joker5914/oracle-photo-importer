@@ -1,123 +1,92 @@
-# Oracle Photo Importer
+# Customer Photo Importer
 
-Bulk-imports customer photos (`.jpg`) into an Oracle 19c `CUSTOMER_PHOTO` table as BLOBs.
+A tool that copies a folder of customer photos from your computer into the Oracle database, so the photos show up on each customer's record in the system.
 
-Each photo file must be named with the customer's `CUSTOMERNUMBER` (e.g. `1234567.jpg`). The tool resolves each `CUSTOMERNUMBER` to its `CUST_ID` via the `CUSTOMER` table and then writes the file bytes into `CUSTOMER_PHOTO.PHOTO`, also updating `PHOTOMODIFIEDDATE`. If a row already exists for that `CUST_ID`, it is updated; otherwise it is inserted.
+## What you need before you start
 
-## Highlights
+1. **A Windows computer** (Mac and Linux work too, but this guide is written for Windows).
+2. **Python** installed on the computer. If it isn't, the tool tells you exactly how to get it (it's free and takes about 2 minutes).
+3. **Your database login** — the server address, your username, and your password. Your database administrator can give you these if you don't know them.
+4. **A folder full of photos.** Each photo file has to be named with the customer's number plus `.jpg`. For example, customer number `1234567` should be saved as `1234567.jpg`.
 
-- **No Oracle client required.** Uses the modern [`oracledb`](https://python-oracledb.readthedocs.io/) driver in *thin mode*, which connects directly to Oracle 12.1+ (including 19c).
-- **Fast.** All customer-number lookups happen in a single batched `IN`-list query, and photo bytes are written via `executemany` with a `BLOB` input hint.
-- **Safe.** Uses `MERGE` so the tool is idempotent — re-running on the same directory updates existing photos instead of duplicating them.
-- **Visible progress.** A `tqdm` progress bar shows count, rate, ETA, and live counters for OK / missing / errored files.
-- **Windows-friendly.** Drop-in `install.bat`, `run.bat`, and an optional `build_exe.bat` to produce a single standalone `photo_importer.exe`.
+## How to install (just once)
 
-## Requirements
+1. On this page, click the green **`Code`** button, then **`Download ZIP`**.
+2. Find the ZIP file you just downloaded (usually in your **Downloads** folder) and unzip it. Putting the unzipped folder on your Desktop is a good choice.
+3. Open the folder.
+4. Double-click **`Start Photo Importer`**.
+5. The first time you run it, the tool sets itself up. This takes about a minute. Don't close the window while it's working.
 
-- Windows 10/11 (also runs on macOS/Linux)
-- Python 3.8 or newer ([download](https://www.python.org/downloads/))
-- Network access to your Oracle 19c database
-- Oracle credentials with `SELECT` on `CUSTOMER` and `INSERT`/`UPDATE` on `CUSTOMER_PHOTO`
+That's the whole install. After that, just double-click **`Start Photo Importer`** any time you want to import photos.
 
-## Install (Windows)
+## How to use it
 
-1. Clone or download this repo.
-2. Double-click `install.bat`. This will:
-   - Create a local virtual environment in `.venv\`
-   - Install `oracledb`, `tqdm`, and `python-dotenv`
-   - Copy `.env.example` to `.env` for you to fill in
-3. Edit `.env` and set your Oracle username, password, and DSN:
+Double-click **`Start Photo Importer`**.
 
-   ```env
-   ORACLE_USER=app_user
-   ORACLE_PASSWORD=secret
-   ORACLE_DSN=db-host.example.com:1521/ORCLPDB1
-   ```
+The tool asks a few simple questions:
 
-   The DSN format is `host:port/service_name`. Easy Connect strings like `host/service` also work.
+1. **The first time only:** it asks for your database server, port, service name, username, and password. After that, it remembers them and just asks *"Use the same settings as last time?"*.
+2. **It tests your login.** If something is wrong, it tells you exactly what to check in plain English.
+3. **A pop-up window opens** so you can browse to the folder with your photos. Click the folder and click **Select Folder**.
+4. **It tells you how many photos it found** and asks if you want to go ahead.
+5. **It imports the photos** and shows you a progress bar with how many are done, how long is left, and how many were skipped (if any).
+6. **It shows a summary** when it's done.
 
-## Usage
+Press Enter to close the window when you're finished.
 
-```bat
-run.bat --dir "C:\photos\to_import"
-```
+## What if something goes wrong?
 
-Full options:
+The tool explains common problems in plain English. The most likely ones:
 
-```
-run.bat --dir <DIR> [options]
+- **"Could not connect to the database"** — You may not be connected to the office network or VPN. Check that first. Also double-check the server name and port.
+- **"Username or password is wrong"** — Type them again carefully. The password letters are hidden as you type, so typos are easy.
+- **"None of the photo file names match any customer numbers"** — Check that each photo's file name is just the customer's number, like `1234567.jpg`. Names with letters in them, or extra words, won't work.
 
-  --dir, -d DIR         Directory containing .jpg files named <customernumber>.jpg
-  --user, -u NAME       Oracle username (overrides ORACLE_USER)
-  --password, -p PASS   Oracle password (overrides ORACLE_PASSWORD)
-  --dsn DSN             Oracle DSN host:port/service (overrides ORACLE_DSN)
-  --ext .jpg            File extension to scan for (default .jpg)
-  --batch-size 50       Rows per executemany batch (default 50)
-  --dry-run             Scan and look up cust_ids, but make no DB writes
-  --log-file PATH       Log file path (default ./photo_importer.log)
-  --verbose, -v         Also log to the console
-```
+If something else goes wrong, the tool writes the technical details to a file called **`photo_importer.log`** in the same folder. If you need help, send that file to your IT person.
 
-Examples:
+## Naming your photos
 
-```bat
-REM Try it first — see what would import without writing anything
-run.bat --dir "C:\photos" --dry-run
+The tool finds each customer by looking at the photo's file name. The file name has to be the customer's `customernumber` value, followed by `.jpg`.
 
-REM Real run
-run.bat --dir "C:\photos"
+| File name           | Works?       | Why                                     |
+|---------------------|--------------|-----------------------------------------|
+| `1234567.jpg`       | Yes          | Just the customer number plus `.jpg`    |
+| `9876543.jpg`       | Yes          | Just the customer number plus `.jpg`    |
+| `John_Smith.jpg`    | No           | The name isn't a number                 |
+| `cust_1234567.jpg`  | No           | Has extra text in front                 |
+| `1234567.jpeg`      | No           | The file must end in `.jpg`, not `.jpeg`|
 
-REM Custom DSN, ignore .env
-run.bat --dir "C:\photos" --user app --password secret --dsn db.example.com:1521/ORCL
-```
+## Where your settings are saved
 
-### Example output
+After your first run, the tool remembers your database settings (including the password) in a file called `settings.json` in the same folder as the tool.
 
-```
-Found 4821 file(s) in C:\photos\to_import
-Connecting to Oracle at db.example.com:1521/ORCLPDB1 as app_user...
-Looking up cust_ids...
-  Matched 4810 of 4821 customer numbers.
-Importing: 100%|██████████| 4821/4821 [01:14<00:00, 64.7photo/s, ok=4810, missing=11, err=0]
+**Keep this file private** — it contains your database password. Don't share the folder with anyone you wouldn't share your password with. To clear your saved settings, just delete `settings.json` and the tool will ask for everything again next time.
 
-Done in 74.5s — 4810 imported, 11 unmatched, 0 read errors.
-```
+## Re-running on the same photos
 
-## Building a single-file `.exe`
+It's safe to run the tool again on the same folder. If a customer already has a photo, the tool just updates it with the newer one — it doesn't create duplicates. So if you're not sure whether something imported, just run it again.
 
-If you'd rather hand teammates a single executable instead of a Python install:
+---
 
-```bat
-build_exe.bat
-```
+## For IT / technical staff
 
-The output is `dist\photo_importer.exe`. It still reads `.env` from the working directory.
+This tool is built in Python 3 using [`oracledb`](https://python-oracledb.readthedocs.io/) in *thin mode*, so no Oracle Instant Client needs to be installed on the operator's machine. It works against Oracle 12.1 and newer, including 19c.
 
-## How it works
+**How it works:**
 
-1. **Scan** the target directory for files matching `--ext` (default `.jpg`).
-2. **Resolve cust_ids** in chunks of up to 1000 via a single batched query against `CUSTOMER`. Files whose stem isn't a numeric customer number, or whose number doesn't exist, are recorded as *unmatched* and skipped (not fatal).
-3. **Import** each photo using `MERGE INTO CUSTOMER_PHOTO` so the tool either inserts a new row or updates the existing one. Photo bytes are bound as `DB_TYPE_BLOB` and flushed in batches.
-4. **Commit** at the end of every batch so progress survives interruption.
-5. **Log** unmatched / errored files to `photo_importer.log` for review.
+- `Start Photo Importer.bat` finds Python (or walks the user through installing it), creates a `.venv\`, installs `oracledb` and `tqdm`, then launches `photo_importer.py`.
+- The Python script is fully interactive: it prompts for credentials, opens a tkinter folder-picker dialog, and saves answers (yes, including the password) to `settings.json` so subsequent runs only need a single confirmation.
+- Customer-number lookups against `CUSTOMER.CUSTOMERNUMBER` are done in chunks of up to 1000 in a single query each.
+- Photos are written into `CUSTOMER_PHOTO` via a `MERGE` statement so re-runs update existing rows instead of failing on the primary key.
+- `PHOTO` is bound as `DB_TYPE_BLOB`. Writes happen via `executemany` in batches of 50, with a per-row fallback if a batch fails so a single bad file can't poison the whole batch. `conn.commit()` runs after every batch so progress survives an interruption.
+- `PHOTOMODIFIEDDATE` is stamped to `SYSTIMESTAMP` on every write. The `THUMBNAIL` / `THUMBNAILMODIFIEDDATE` columns are not touched.
+- All warnings and errors are written to `photo_importer.log`. The console stays clean for the progress bar.
 
-## Schema reference
+**Distributing without Python:**
 
-The tool targets the following columns:
+If you'd rather hand teammates a single `.exe`, run `build_exe.bat` (after `Start Photo Importer.bat` has been run at least once to set up the venv). The output is `dist\photo_importer.exe` — a standalone binary that still uses `settings.json` from the working directory.
 
-| Table             | Column              | Type                       | Notes                              |
-|-------------------|---------------------|----------------------------|------------------------------------|
-| `CUSTOMER`        | `CUST_ID`           | `NUMBER(10,0)`             | PK — looked up via `CUSTOMERNUMBER`|
-| `CUSTOMER`        | `CUSTOMERNUMBER`    | `NUMBER(22,0)`             | Matched against filename stem      |
-| `CUSTOMER_PHOTO`  | `CUST_ID`           | `NUMBER(10,0)`             | PK / FK to `CUSTOMER`              |
-| `CUSTOMER_PHOTO`  | `PHOTO`             | `BLOB`                     | File bytes written here            |
-| `CUSTOMER_PHOTO`  | `PHOTOMODIFIEDDATE` | `TIMESTAMP WITH TIME ZONE` | Set to `SYSTIMESTAMP` on write     |
+**Required Oracle privileges:**
 
-Thumbnails (`THUMBNAIL`, `THUMBNAILMODIFIEDDATE`) are **not** populated by this tool.
-
-## Troubleshooting
-
-- **`DPY-6005: cannot connect to database`** — Check that the host is reachable (`tnsping`, `ping`, or `Test-NetConnection`) and that the DSN format is `host:port/service`, not `host:port:SID`.
-- **`ORA-01017: invalid username/password`** — Verify the `.env` values; the `ORACLE_PASSWORD` line should have no surrounding quotes.
-- **Filenames not matched** — Make sure the filename *stem* (without `.jpg`) is exactly the `CUSTOMERNUMBER` value. Leading zeros are stripped automatically since the column is numeric.
-- **Slow imports** — Try raising `--batch-size` (e.g. `--batch-size 200`). Very large photos (multi-MB each) are bound up by network throughput, not by the script.
+- `SELECT` on `CUSTOMER`
+- `INSERT`, `UPDATE` on `CUSTOMER_PHOTO`

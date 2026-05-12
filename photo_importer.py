@@ -1,47 +1,57 @@
 #!/usr/bin/env python3
-"""Oracle Photo Importer.
+"""Customer Photo Importer.
 
-Bulk-imports customer photos (.jpg) into the Oracle 19c CUSTOMER_PHOTO table.
-
-Filenames must match the CUSTOMER.CUSTOMERNUMBER value (e.g. ``1234567.jpg``).
-The tool looks up CUST_ID via the CUSTOMER table, then MERGEs each photo into
-CUSTOMER_PHOTO.PHOTO as a BLOB and stamps PHOTOMODIFIEDDATE = SYSTIMESTAMP.
-
-Usage:
-    python photo_importer.py --dir C:\\photos --dsn host:1521/svc --user u --password p
-
-See README.md for full documentation.
+A simple, interactive tool that imports customer photos into an Oracle 19c
+database. Walks the operator through every step in plain language; no
+command-line flags or config-file editing required.
 """
 from __future__ import annotations
 
-import argparse
+import getpass
+import json
 import logging
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
+
+
+def _die_friendly(message: str) -> None:
+    """Show a friendly message, pause, and exit."""
+    print()
+    print(f"  {message}")
+    print()
+    try:
+        input("  Press Enter to close this window...")
+    except (KeyboardInterrupt, EOFError):
+        pass
+    sys.exit(1)
+
 
 try:
     import oracledb
 except ImportError:
-    sys.exit("Missing dependency: pip install oracledb")
+    _die_friendly(
+        "The Oracle database library isn't installed yet.\n"
+        "  Close this window and run 'Start Photo Importer' again to set things up."
+    )
 
 try:
     from tqdm import tqdm
 except ImportError:
-    sys.exit("Missing dependency: pip install tqdm")
+    _die_friendly(
+        "A required component (tqdm) isn't installed yet.\n"
+        "  Close this window and run 'Start Photo Importer' again to set things up."
+    )
 
-try:
-    from dotenv import load_dotenv
 
-    load_dotenv()
-except ImportError:
-    pass  # python-dotenv is optional; env vars can be set externally
-
+SCRIPT_DIR = Path(__file__).resolve().parent
+SETTINGS_FILE = SCRIPT_DIR / "settings.json"
+LOG_FILE = SCRIPT_DIR / "photo_importer.log"
 LOG = logging.getLogger("photo_importer")
+BATCH_SIZE = 50
 
-# MERGE so re-runs update an existing row instead of failing with PK violation.
 MERGE_SQL = """
 MERGE INTO CUSTOMER_PHOTO tgt
 USING (SELECT :cust_id AS CUST_ID FROM dual) src
@@ -55,96 +65,210 @@ WHEN NOT MATCHED THEN
 """
 
 
-# --------------------------------------------------------------------------- CLI
+# ============================================================================
+# UI helpers
+# ============================================================================
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        prog="photo_importer",
-        description=(
-            "Bulk-import customer .jpg photos into Oracle 19c CUSTOMER_PHOTO. "
-            "Filenames must be <customernumber>.jpg."
-        ),
-    )
-    p.add_argument("--dir", "-d", required=True,
-                   help="Directory containing photo files named <customernumber>.jpg.")
-    p.add_argument("--user", "-u", default=os.getenv("ORACLE_USER"),
-                   help="Oracle username (or set ORACLE_USER env var).")
-    p.add_argument("--password", "-p", default=os.getenv("ORACLE_PASSWORD"),
-                   help="Oracle password (or set ORACLE_PASSWORD env var).")
-    p.add_argument("--dsn", default=os.getenv("ORACLE_DSN"),
-                   help="Oracle DSN as host:port/service (or set ORACLE_DSN env var).")
-    p.add_argument("--batch-size", type=int, default=50,
-                   help="Rows per executemany batch (default: 50).")
-    p.add_argument("--ext", default=".jpg",
-                   help="File extension to scan for (default: .jpg).")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Scan and look up cust_ids but do not write to the DB.")
-    p.add_argument("--log-file", default="photo_importer.log",
-                   help="Log file path (default: ./photo_importer.log).")
-    p.add_argument("--verbose", "-v", action="store_true",
-                   help="Also log INFO/WARNING messages to the console.")
-    args = p.parse_args()
+def banner() -> None:
+    print()
+    print("  " + "=" * 60)
+    print("                  Customer Photo Importer")
+    print("  " + "=" * 60)
+    print()
 
-    missing = [k for k in ("user", "password", "dsn") if not getattr(args, k)]
-    if missing:
-        p.error(
-            "Missing required Oracle connection setting(s): "
-            + ", ".join(missing)
-            + ". Provide via CLI flags or a .env file."
+
+def section(title: str) -> None:
+    print()
+    print(f"  --- {title} ---")
+    print()
+
+
+def info(msg: str = "") -> None:
+    if msg:
+        print(f"  {msg}")
+    else:
+        print()
+
+
+def ok(msg: str) -> None:
+    print(f"  [OK]  {msg}")
+
+
+def fail(msg: str) -> None:
+    print(f"  [!]   {msg}")
+
+
+def ask(prompt: str, default: Optional[str] = None, password: bool = False) -> str:
+    suffix = f"  [{default}]" if default else ""
+    while True:
+        if password:
+            val = getpass.getpass(f"  {prompt}{suffix}: ")
+        else:
+            val = input(f"  {prompt}{suffix}: ").strip()
+        if not val and default is not None:
+            return default
+        if val:
+            return val
+        print("  Please enter a value (or press Ctrl+C to cancel).")
+
+
+def ask_yes_no(prompt: str, default: bool = True) -> bool:
+    suffix = "[Y/n]" if default else "[y/N]"
+    while True:
+        val = input(f"  {prompt} {suffix}: ").strip().lower()
+        if not val:
+            return default
+        if val in ("y", "yes"):
+            return True
+        if val in ("n", "no"):
+            return False
+        print("  Please type Y for yes or N for no.")
+
+
+# ============================================================================
+# Saved settings
+# ============================================================================
+
+def load_settings() -> Dict[str, str]:
+    if SETTINGS_FILE.exists():
+        try:
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception as exc:
+            LOG.warning("Could not read settings file: %s", exc)
+    return {}
+
+
+def save_settings(settings: Dict[str, str]) -> None:
+    try:
+        SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    except OSError as exc:
+        LOG.warning("Could not save settings file: %s", exc)
+
+
+# ============================================================================
+# Folder picker (graphical)
+# ============================================================================
+
+def pick_folder_dialog(initial: Optional[str] = None) -> Optional[str]:
+    """Show a folder-browser dialog. Returns None on cancel or error."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError:
+        return None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askdirectory(
+            title="Choose the folder that contains your customer photos",
+            initialdir=initial if initial and Path(initial).is_dir() else os.getcwd(),
         )
-    return args
+        root.destroy()
+        return path or None
+    except Exception as exc:
+        LOG.warning("Folder picker failed: %s", exc)
+        return None
 
 
-def setup_logging(log_file: str, verbose: bool) -> None:
-    fmt = "%(asctime)s [%(levelname)s] %(message)s"
-    handlers: List[logging.Handler] = [logging.FileHandler(log_file, encoding="utf-8")]
-    if verbose:
-        # tqdm.write() handles stdout safely, but logging straight to stderr is fine.
-        handlers.append(logging.StreamHandler(stream=sys.stderr))
-    logging.basicConfig(level=logging.INFO, format=fmt, handlers=handlers, force=True)
+# ============================================================================
+# Setup wizard
+# ============================================================================
 
+def setup_wizard(saved: Dict[str, str]) -> Dict[str, str]:
+    section("Database connection")
+    info("Please tell me how to connect to your Oracle database.")
+    info("If you don't know any of these, ask your database administrator.")
+    print()
 
-# --------------------------------------------------------------------------- core
-
-def scan_directory(directory: Path, ext: str) -> List[Path]:
-    if not directory.is_dir():
-        raise FileNotFoundError(f"Directory not found: {directory}")
-    ext_lc = ext.lower()
-    return sorted(
-        p for p in directory.iterdir()
-        if p.is_file() and p.suffix.lower() == ext_lc
+    server = ask(
+        "Database server name or address (example: db.company.com)",
+        default=saved.get("server"),
     )
+    port = ask("Database port number", default=saved.get("port") or "1521")
+    service = ask(
+        "Database service name (example: ORCLPDB1)",
+        default=saved.get("service"),
+    )
+    user = ask("Your database username", default=saved.get("user"))
+    password = ask("Your database password", password=True)
 
+    return {
+        "server": server,
+        "port": port,
+        "service": service,
+        "user": user,
+        "password": password,
+    }
+
+
+# ============================================================================
+# Plain-English error explanations
+# ============================================================================
+
+def explain_db_error(exc: BaseException) -> None:
+    text = str(exc)
+    lower = text.lower()
+
+    if "ora-01017" in lower:
+        info("The database says the username or password is wrong.")
+        info("")
+        info("  - Make sure Caps Lock is off.")
+        info("  - Type the password carefully (the letters are hidden as you type).")
+        info("  - If your password was recently changed, use the new one.")
+    elif "ora-12514" in lower or "ora-12505" in lower:
+        info("The database server answered, but it doesn't recognize the")
+        info("service name you entered.")
+        info("")
+        info("  - Double-check the service name (often something like ORCLPDB1).")
+        info("  - Ask your database administrator if you're not sure.")
+    elif (
+        "dpy-6005" in lower
+        or "could not connect" in lower
+        or "tns-12541" in lower
+        or "12170" in lower
+        or "timeout" in lower
+    ):
+        info("Could not reach the database server. This usually means:")
+        info("")
+        info("  - The server name or port number is wrong, OR")
+        info("  - This computer isn't on the office network / VPN, OR")
+        info("  - The database server is currently down.")
+        info("")
+        info("Check those, then start the tool again.")
+    else:
+        info("The database returned this message:")
+        info(f"  {text}")
+        info("")
+        info("Try starting the tool again, or contact your IT support.")
+
+
+# ============================================================================
+# Database core
+# ============================================================================
 
 def fetch_custid_map(
     conn: "oracledb.Connection", customer_numbers: List[str]
 ) -> Dict[str, int]:
-    """Resolve filename stems -> CUST_ID in batches of 1000.
-
-    Returns a dict keyed by the *normalized* numeric string
-    (e.g. "007" and "7" both map to key "7").
-    """
-    # Normalize and de-duplicate.
+    """Resolve filename stems to CUST_IDs via a single batched query."""
     unique_nums: Dict[int, None] = {}
     for raw in customer_numbers:
         try:
             unique_nums[int(raw)] = None
         except ValueError:
-            # Filename stem isn't numeric — it can never match. Skip silently.
             continue
-
     if not unique_nums:
         return {}
-
-    numbers = list(unique_nums.keys())
+    numbers = list(unique_nums)
     mapping: Dict[str, int] = {}
-    chunk = 1000  # Oracle's hard IN-list cap.
-
     cur = conn.cursor()
     cur.arraysize = 1000
     try:
+        chunk = 1000  # Oracle's IN-list hard limit
         for i in range(0, len(numbers), chunk):
-            slice_ = numbers[i:i + chunk]
+            slice_ = numbers[i : i + chunk]
             placeholders = ", ".join(f":{j + 1}" for j in range(len(slice_)))
             sql = (
                 "SELECT CUSTOMERNUMBER, CUST_ID FROM CUSTOMER "
@@ -155,165 +279,244 @@ def fetch_custid_map(
                 mapping[str(int(cust_number))] = int(cust_id)
     finally:
         cur.close()
-
     return mapping
 
 
-def flush_batch(
-    cur: "oracledb.Cursor",
-    batch: List[Dict[str, object]],
-    dry_run: bool,
-) -> int:
-    """Write a batch via executemany; on failure, retry row-by-row.
-
-    Returns the number of rows successfully written.
-    """
+def flush_batch(cur: "oracledb.Cursor", batch: List[Dict[str, object]]) -> int:
+    """Write a batch with executemany; on failure, fall back to row-by-row."""
     if not batch:
         return 0
-    if dry_run:
-        return len(batch)
-
     try:
         cur.executemany(MERGE_SQL, batch)
         return len(batch)
     except oracledb.DatabaseError as exc:
-        LOG.warning("Batch failed (%s). Retrying row-by-row to isolate bad rows.", exc)
+        LOG.warning("Batch failed (%s). Retrying photos one at a time.", exc)
         success = 0
         for row in batch:
             try:
                 cur.execute(MERGE_SQL, row)
                 success += 1
             except oracledb.DatabaseError as row_exc:
-                LOG.error("Row failed cust_id=%s: %s", row.get("cust_id"), row_exc)
+                LOG.error("Photo failed cust_id=%s: %s", row.get("cust_id"), row_exc)
         return success
 
 
-def import_photos(args: argparse.Namespace) -> Tuple[int, int, int]:
-    directory = Path(args.dir).resolve()
-    files = scan_directory(directory, args.ext)
-    if not files:
-        print(f"No '{args.ext}' files found in {directory}")
-        return (0, 0, 0)
+def import_photos(
+    conn: "oracledb.Connection", files: List[Path]
+) -> Tuple[int, int, int]:
+    customer_numbers = [f.stem for f in files]
+    info("Looking up customer records in the database...")
+    custid_map = fetch_custid_map(conn, customer_numbers)
+    info(f"Matched {len(custid_map)} customer number(s) in the database.")
+    if not custid_map:
+        print()
+        fail("None of the photo file names match any customer numbers.")
+        info("File names need to match the customer number, like '1234567.jpg'.")
+        return 0, len(files), 0
 
-    print(f"Found {len(files)} file(s) in {directory}")
-    print(f"Connecting to Oracle at {args.dsn} as {args.user}...")
+    print()
+    ok_count = 0
+    missing = 0
+    errors = 0
+    batch: List[Dict[str, object]] = []
 
-    t0 = time.perf_counter()
+    cur = conn.cursor()
+    cur.setinputsizes(photo=oracledb.DB_TYPE_BLOB)
 
-    with oracledb.connect(user=args.user, password=args.password, dsn=args.dsn) as conn:
-        customer_numbers = [f.stem for f in files]
-        print("Looking up cust_ids...")
-        custid_map = fetch_custid_map(conn, customer_numbers)
-        print(f"  Matched {len(custid_map)} of {len(set(customer_numbers))} unique customer numbers.")
+    progress = tqdm(
+        files,
+        unit="photo",
+        dynamic_ncols=True,
+        desc="  Importing",
+        smoothing=0.1,
+    )
 
-        ok = 0
-        missing_match = 0
-        errors = 0
-        batch: List[Dict[str, object]] = []
-
-        cur = conn.cursor()
-        # Hint: bind :photo as a real BLOB so files larger than ~32KB work cleanly.
-        cur.setinputsizes(photo=oracledb.DB_TYPE_BLOB)
-
-        progress = tqdm(
-            files,
-            unit="photo",
-            dynamic_ncols=True,
-            desc="Importing",
-            smoothing=0.1,
-        )
-
-        try:
-            for path in progress:
-                try:
-                    normalized = str(int(path.stem))
-                except ValueError:
-                    LOG.warning("Filename is not a numeric customer number: %s", path.name)
-                    missing_match += 1
-                    progress.set_postfix(ok=ok, missing=missing_match, err=errors)
-                    continue
-
-                cust_id = custid_map.get(normalized)
-                if cust_id is None:
-                    LOG.warning(
-                        "No CUSTOMER row for file %s (customernumber=%s)",
-                        path.name, normalized,
-                    )
-                    missing_match += 1
-                    progress.set_postfix(ok=ok, missing=missing_match, err=errors)
-                    continue
-
-                try:
-                    photo_bytes = path.read_bytes()
-                except OSError as exc:
-                    LOG.error("Failed to read %s: %s", path, exc)
-                    errors += 1
-                    progress.set_postfix(ok=ok, missing=missing_match, err=errors)
-                    continue
-
-                batch.append({"cust_id": cust_id, "photo": photo_bytes})
-
-                if len(batch) >= args.batch_size:
-                    written = flush_batch(cur, batch, args.dry_run)
-                    ok += written
-                    errors += len(batch) - written
-                    batch.clear()
-                    if not args.dry_run:
-                        conn.commit()
-                    progress.set_postfix(ok=ok, missing=missing_match, err=errors)
-
-            # Final flush
-            if batch:
-                written = flush_batch(cur, batch, args.dry_run)
-                ok += written
+    try:
+        for path in progress:
+            try:
+                normalized = str(int(path.stem))
+            except ValueError:
+                LOG.warning("File name is not a number: %s", path.name)
+                missing += 1
+                progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
+                continue
+            cust_id = custid_map.get(normalized)
+            if cust_id is None:
+                LOG.warning("No customer found for: %s", path.name)
+                missing += 1
+                progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
+                continue
+            try:
+                blob = path.read_bytes()
+            except OSError as exc:
+                LOG.error("Could not read %s: %s", path, exc)
+                errors += 1
+                progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
+                continue
+            batch.append({"cust_id": cust_id, "photo": blob})
+            if len(batch) >= BATCH_SIZE:
+                written = flush_batch(cur, batch)
+                ok_count += written
                 errors += len(batch) - written
                 batch.clear()
-                if not args.dry_run:
-                    conn.commit()
-                progress.set_postfix(ok=ok, missing=missing_match, err=errors)
-        finally:
-            progress.close()
-            cur.close()
+                conn.commit()
+                progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
+        if batch:
+            written = flush_batch(cur, batch)
+            ok_count += written
+            errors += len(batch) - written
+            batch.clear()
+            conn.commit()
+            progress.set_postfix(done=ok_count, skipped=missing, errors=errors)
+    finally:
+        progress.close()
+        cur.close()
 
-    elapsed = time.perf_counter() - t0
-    rate = (ok / elapsed) if elapsed > 0 else 0.0
-    print(
-        f"\nDone in {elapsed:.1f}s ({rate:.1f} photos/s) \u2014 "
-        f"{ok} imported, {missing_match} unmatched, {errors} errors."
-    )
-    if args.dry_run:
-        print("(dry-run: no DB writes were performed)")
-    return ok, missing_match, errors
+    return ok_count, missing, errors
 
 
-# --------------------------------------------------------------------------- entry
+# ============================================================================
+# Main flow
+# ============================================================================
 
-def main() -> int:
-    args = parse_args()
-    setup_logging(args.log_file, args.verbose)
-    LOG.info(
-        "Starting import: dir=%s dsn=%s user=%s dry_run=%s batch=%d ext=%s",
-        args.dir, args.dsn, args.user, args.dry_run, args.batch_size, args.ext,
-    )
+def _run_app() -> int:
+    banner()
+    info("Welcome! This tool copies customer photos into the database.")
+    info("Just answer the questions and we'll do the rest.")
+    print()
+
+    saved = load_settings()
+
+    # ---- Step 1: connection settings ----
+    if saved.get("server") and saved.get("user") and saved.get("password"):
+        info(f"Last time you connected as '{saved['user']}' to '{saved['server']}'.")
+        if ask_yes_no("Use the same database settings as last time?", default=True):
+            settings = dict(saved)
+        else:
+            settings = setup_wizard(saved)
+    else:
+        section("First-time setup")
+        settings = setup_wizard(saved)
+
+    dsn = f"{settings['server']}:{settings['port']}/{settings['service']}"
+
+    # ---- Step 2: test the connection ----
+    section("Connecting to the database")
+    info(f"Connecting to {settings['server']} ...")
     try:
-        ok, missing, errors = import_photos(args)
-    except KeyboardInterrupt:
-        print("\nInterrupted by user.")
-        return 130
-    except FileNotFoundError as exc:
-        print(f"Error: {exc}")
-        return 2
+        conn = oracledb.connect(
+            user=settings["user"],
+            password=settings["password"],
+            dsn=dsn,
+        )
     except oracledb.DatabaseError as exc:
-        LOG.exception("Database error")
-        print(f"Database error: {exc}")
-        return 3
-    except Exception as exc:  # noqa: BLE001
-        LOG.exception("Unexpected error")
-        print(f"Error: {exc}")
+        LOG.exception("Connection failed")
+        print()
+        fail("Could not connect to the database.")
+        print()
+        explain_db_error(exc)
         return 1
 
-    LOG.info("Finished: ok=%d missing=%d errors=%d", ok, missing, errors)
-    return 0 if errors == 0 else 4
+    ok("Connected!")
+    save_settings(settings)  # only after a successful connect
+
+    try:
+        # ---- Step 3: pick the photo folder ----
+        section("Choose your photo folder")
+        info("A window will pop up so you can browse to your folder.")
+        info("(If the window doesn't appear, look behind this one.)")
+        folder = pick_folder_dialog(initial=saved.get("last_folder"))
+        if not folder:
+            print()
+            info("No folder was picked.")
+            folder = ask(
+                "Type the full path to your photo folder",
+                default=saved.get("last_folder"),
+            )
+        folder_path = Path(folder).expanduser().resolve()
+        if not folder_path.is_dir():
+            print()
+            fail(f"That folder doesn't exist: {folder_path}")
+            info("Double-check the path and try again.")
+            return 1
+        settings["last_folder"] = str(folder_path)
+        save_settings(settings)
+
+        # ---- Step 4: scan ----
+        files = sorted(
+            p for p in folder_path.iterdir()
+            if p.is_file() and p.suffix.lower() == ".jpg"
+        )
+        if not files:
+            print()
+            fail(f"No .jpg photos were found in {folder_path}")
+            info("Make sure the folder contains photos with names ending in .jpg")
+            return 1
+
+        print()
+        info(f"Found {len(files)} photo(s) in:")
+        info(f"  {folder_path}")
+        print()
+        if not ask_yes_no(f"Ready to import these {len(files)} photo(s)?", default=True):
+            print()
+            info("OK, cancelled. No changes were made.")
+            return 0
+
+        # ---- Step 5: import ----
+        section("Importing photos")
+        t0 = time.perf_counter()
+        ok_count, missing, errors = import_photos(conn, files)
+        elapsed = time.perf_counter() - t0
+
+        # ---- Step 6: summary ----
+        print()
+        print("  " + "=" * 60)
+        print("                          All Done!")
+        print("  " + "=" * 60)
+        print()
+        print(f"     Imported successfully:        {ok_count}")
+        print(f"     No matching customer:         {missing}")
+        print(f"     Could not read file:          {errors}")
+        print(f"     Time taken:                   {elapsed:.1f} seconds")
+        print()
+        if missing or errors:
+            info("Some photos were skipped. Details are in:")
+            info(f"  {LOG_FILE.name}")
+            print()
+
+        return 0 if errors == 0 else 4
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.FileHandler(str(LOG_FILE), encoding="utf-8")],
+        force=True,
+    )
+    try:
+        return _run_app()
+    except KeyboardInterrupt:
+        print()
+        info("Cancelled. No more changes will be made.")
+        return 130
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception("Unexpected error")
+        print()
+        fail(f"Something went wrong: {exc}")
+        info(f"Details have been saved to: {LOG_FILE.name}")
+        return 1
+    finally:
+        try:
+            print()
+            input("  Press Enter to close this window...")
+        except (KeyboardInterrupt, EOFError):
+            pass
 
 
 if __name__ == "__main__":
